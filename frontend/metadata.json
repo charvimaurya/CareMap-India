@@ -1,0 +1,6 @@
+{
+  "name": "CareMap India",
+  "description": "Smart health care navigation and symptom triage assistant for India.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": []
+}

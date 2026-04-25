@@ -14,8 +14,16 @@
 }
 
 @layer base {
+  html {
+    @apply antialiased;
+  }
+
   body {
-    @apply bg-background text-slate-900 font-sans antialiased;
+    @apply m-0 min-h-screen bg-background text-slate-900 font-sans;
+  }
+
+  #root {
+    @apply min-h-screen block;
   }
 }
 

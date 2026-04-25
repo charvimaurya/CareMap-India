@@ -21,10 +21,10 @@ export default function App() {
   const startTriage = () => setState(prev => ({ ...prev, step: 'COMPLAINT' }));
 
   return (
-    <div className="min-h-screen flex flex-col font-sans">
+    <div className="min-h-screen font-sans">
       <Navbar onLogoClick={reset} />
-      
-      <main className="flex-1">
+
+      <main className="w-full">
         <AnimatePresence mode="wait">
           {state.step === 'HOME' ? (
             <Hero key="hero" onStart={startTriage} />

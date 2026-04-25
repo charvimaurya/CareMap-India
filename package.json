@@ -1,0 +1,12 @@
+{
+  "name": "caremap-india",
+  "private": true,
+  "description": "CareMap India — app lives in /frontend",
+  "workspaces": ["frontend"],
+  "scripts": {
+    "dev": "npm run dev --workspace=frontend",
+    "build": "npm run build --workspace=frontend",
+    "preview": "npm run preview --workspace=frontend",
+    "lint": "npm run lint --workspace=frontend"
+  }
+}

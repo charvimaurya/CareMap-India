@@ -47,7 +47,7 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
       initial={{ opacity: 0, y: 20 }} 
       animate={{ opacity: 1, y: 0 }} 
       exit={{ opacity: 0, y: -20 }}
-      className="py-16 px-4 bg-surface min-h-[calc(100vh-80px)]"
+      className="py-16 px-4 bg-surface"
     >
       <div className="max-w-2xl mx-auto">
         <div className="mb-8 flex items-center justify-between">

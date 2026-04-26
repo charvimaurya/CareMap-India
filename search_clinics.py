@@ -1,4 +1,5 @@
 import argparse
+import concurrent.futures
 import csv
 import hashlib
 import importlib.metadata
@@ -205,10 +206,12 @@ def require_env(name: str) -> str:
     return value
 
 
+@lru_cache(maxsize=1)
 def get_openai_client() -> OpenAI:
     return OpenAI(api_key=require_env("OPENAI_API_KEY"))
 
 
+@lru_cache(maxsize=1)
 def get_chroma_collection():
     chroma_client = chromadb.CloudClient(
         cloud_port=get_chroma_port(),
@@ -581,10 +584,15 @@ def global_semantic_search(
             args["where"] = where
         return collection.query(**args)
 
-    try:
-        dense_results = _run_dense(combined_where)
-    except Exception:
-        dense_results = _run_dense(explicit_where)
+    # Run BM25 (in-memory) concurrently with the Chroma cloud call so BM25
+    # finishes during the network round-trip instead of adding to it.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        bm25_future = pool.submit(bm25_search, expanded_query, combined_where, BM25_TOPK)
+        try:
+            dense_results = _run_dense(combined_where)
+        except Exception:
+            dense_results = _run_dense(explicit_where)
+        bm25_raw = bm25_future.result()
 
     dense_hits: list[dict[str, Any]] = []
     if dense_results.get("ids") and dense_results["ids"][0]:
@@ -603,7 +611,6 @@ def global_semantic_search(
                 "semantic_score": 1.0 / (1.0 + max(distance_value, 0.0)),
             })
 
-    bm25_raw = bm25_search(expanded_query, combined_where, BM25_TOPK)
     bm25_hits: list[dict[str, Any]] = []
     for hit in bm25_raw:
         bm25_hits.append({

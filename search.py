@@ -36,9 +36,9 @@ RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 BM25_INDEX_FILE = Path(__file__).resolve().parent / "db" / "bm25_index.json"
 
-DENSE_TOPK = 50
-BM25_TOPK = 50
-RERANK_TOPK = 30
+DENSE_TOPK = 30
+BM25_TOPK = 30
+RERANK_TOPK = 15
 FINAL_TOPK = 5
 RRF_K = 60
 

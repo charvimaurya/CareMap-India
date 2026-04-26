@@ -30,7 +30,7 @@ export const Hero: React.FC<HeroProps> = ({ onStart }) => {
 
         <div className="flex justify-center">
           <button onClick={onStart} className="btn-primary flex items-center justify-center gap-2 text-lg">
-            Start Triage Now <ArrowRight size={20} />
+            Start Now <ArrowRight size={20} />
           </button>
         </div>
 

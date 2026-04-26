@@ -1,10 +1,16 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import { PlusCircle, Activity, Shield, MapPin, Search, Hospital as HospitalIcon, Loader2 } from 'lucide-react';
-import { TriageStep, TriageState, Hospital, SpecialityInfo } from '../../types';
+import { TriageStep, TriageState, ClinicResultReview, ClinicSearchResponse, ClinicSearchResult, SpecialityInfo } from '../../types';
 import { SPECIALITY_MAP } from '../../constants';
 import { ResultCard } from './ResultCard';
-import { analyzeComplaint, analyzeLocation, analyzeTriageResult, FollowUpQuestion, getFollowUpQuestions } from '../../lib/llm';
+import { LocationPickerMap } from './LocationPickerMap';
+import { buildClinicSearchPrompt, buildClinicSearchPromptDisplay, ClinicSearchPromptDisplay } from '../../lib/clinicSearch';
+import { analyzeComplaint, analyzeLocation, analyzeTriageResult, FollowUpQuestion, getFollowUpQuestions, getSearchPromptSummary, reviewSearchResult } from '../../lib/llm';
+import { reverseGeocodeLocation } from '../../lib/location';
+
+const REVIEW_DELAY_MS = 2000;
+const QUESTIONLESS_SEARCH_DELAY_MS = 250;
 
 interface TriageFlowProps {
   state: TriageState;
@@ -14,13 +20,18 @@ interface TriageFlowProps {
 }
 
 export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset, needsManualLocation }) => {
-  const { step, complaint, selectedSymptoms, severity, duration, location, speciality, showSymptoms, fallbackCount, fallbackMessage, locationAttempts, confirmationData } = state;
-  const [hospitals, setHospitals] = useState<Hospital[]>([]);
+  const { step, complaint, selectedSymptoms, severity, duration, location, userLat, userLon, speciality, showSymptoms, fallbackCount, fallbackMessage, locationAttempts, confirmationData } = state;
+  const [results, setResults] = useState<ClinicSearchResult[]>([]);
+  const [searchPrompt, setSearchPrompt] = useState('');
+  const [searchPromptDisplay, setSearchPromptDisplay] = useState<ClinicSearchPromptDisplay>({ summary: [], qa: [] });
+  const [searchPromptSummary, setSearchPromptSummary] = useState('');
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [resultReviews, setResultReviews] = useState<Record<string, ClinicResultReview>>({});
+  const [reviewedResultCount, setReviewedResultCount] = useState(0);
   const [tempLocation, setTempLocation] = useState('');
   const [locationError, setLocationError] = useState<string | null>(null);
   const [followUpQuestions, setFollowUpQuestions] = useState<FollowUpQuestion[]>([]);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
-  const [triageSummary, setTriageSummary] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isCheckingLocation, setIsCheckingLocation] = useState(false);
 
@@ -53,6 +64,7 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
       speciality: SPECIALITY_MAP[llmAnalysis.specialityName],
       showSymptoms: llmAnalysis.showSymptoms,
       detectedLocation: llmAnalysis.location,
+      inferredSeverity: llmAnalysis.severity,
       healthIssues: llmAnalysis.healthIssues,
     });
     setIsAnalyzing(false);
@@ -71,15 +83,22 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
     speciality,
     showSymptoms,
     detectedLocation,
+    inferredSeverity,
     healthIssues,
   }: {
     text: string;
     speciality: SpecialityInfo;
     showSymptoms?: boolean;
     detectedLocation?: string;
+    inferredSeverity?: string;
     healthIssues?: string[];
   }) => {
-    const questionsAnalysis = await getFollowUpQuestions(text, speciality, healthIssues);
+    const nextLocation = detectedLocation || location || '';
+    const nextSeverity = inferredSeverity || '';
+    const questionsAnalysis = await getFollowUpQuestions(text, speciality, healthIssues, {
+      hasLocation: Boolean(nextLocation),
+      severity: nextSeverity,
+    });
     const nextQuestions = questionsAnalysis?.questions
       ?.filter(question => question.question && question.options?.length)
       .map((question, index) => ({
@@ -88,21 +107,16 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
         options: question.options.filter(Boolean).slice(0, 5),
       }))
       .filter(question => question.options.length >= 2)
-      .slice(0, 4);
-
-    if (!nextQuestions?.length) {
-      handleFallback("I couldn't prepare follow-up questions right now because the AI service is unavailable. Please try again.");
-      return;
-    }
+      .slice(0, 3) || [];
 
     setState(prev => ({
       ...prev,
       complaint: text,
       speciality,
-      location: detectedLocation || prev.location,
+      location: nextLocation || prev.location,
       showSymptoms: true,
       selectedSymptoms: [],
-      severity: '',
+      severity: nextSeverity,
       duration: '',
       fallbackMessage: null,
       confirmationData: null
@@ -110,7 +124,7 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
     setFollowUpQuestions(nextQuestions);
     setCurrentQuestionIndex(0);
 
-    if (!detectedLocation && needsManualLocation) {
+    if (!nextLocation) {
       setStep('LOCATION_PROMPT');
     } else {
       setStep('SPECIALITY_INFO');
@@ -145,6 +159,8 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
     setState(prev => ({ 
       ...prev, 
       location: llmLocation.location!,
+      userLat: null,
+      userLon: null,
       locationAttempts: 0,
       confirmationData: null
     }));
@@ -153,53 +169,178 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
     setIsCheckingLocation(false);
   };
 
+  const handleMapLocationPick = async (latitude: number, longitude: number) => {
+    setLocationError(null);
+    setIsCheckingLocation(true);
+
+    try {
+      const pickedLocation = await reverseGeocodeLocation(latitude, longitude);
+      setState(prev => ({
+        ...prev,
+        location: pickedLocation || prev.location || 'Selected map location',
+        userLat: latitude,
+        userLon: longitude,
+        locationAttempts: 0,
+        confirmationData: null,
+      }));
+      setIsCheckingLocation(false);
+    } catch (error) {
+      console.error('Failed to reverse geocode map selection:', error);
+      setState(prev => ({
+        ...prev,
+        location: prev.location || 'Selected map location',
+        userLat: latitude,
+        userLon: longitude,
+      }));
+      setLocationError('Map pin saved, but the city name could not be resolved. You can still continue.');
+      setIsCheckingLocation(false);
+    }
+  };
+
   const handleConfirmation = (confirmed: boolean) => {
     if (!confirmationData) return;
 
-    if (confirmed) {
-      if (confirmationData.type === 'medical') {
-        setState(prev => ({ ...prev, confirmationData: null }));
-      } else {
+      if (confirmed) {
+        if (confirmationData.type === 'medical') {
+          setState(prev => ({ ...prev, confirmationData: null }));
+        } else {
         setState(prev => ({ 
           ...prev, 
           location: confirmationData.suggestion,
+          userLat: null,
+          userLon: null,
           confirmationData: null,
           locationAttempts: 0
         }));
-        setStep('SPECIALITY_INFO');
-      }
+          setStep('SPECIALITY_INFO');
+        }
     } else {
       setState(prev => ({ ...prev, confirmationData: null }));
     }
   };
 
   const handleSpecialityContinue = () => {
+    if (!location) {
+      setStep('LOCATION_PROMPT');
+      return;
+    }
+
+    if (!followUpQuestions.length) {
+      const finalSeverity = severity || 'Medium';
+      setState(prev => ({
+        ...prev,
+        severity: finalSeverity,
+      }));
+      window.setTimeout(() => {
+        void fetchHospitals(finalSeverity);
+      }, QUESTIONLESS_SEARCH_DELAY_MS);
+      return;
+    }
+
     setStep('SYMPTOMS');
   };
 
+  React.useEffect(() => {
+    if (step !== 'RESULT' || !results.length || !searchPrompt) {
+      setResultReviews({});
+      setReviewedResultCount(0);
+      return;
+    }
+
+    let cancelled = false;
+    setResultReviews({});
+    setReviewedResultCount(0);
+
+    const reviewResultsSequentially = async () => {
+      for (let index = 0; index < results.length; index += 1) {
+        const result = results[index];
+        const review = await reviewSearchResult(searchPrompt, result);
+
+        if (cancelled) return;
+
+        if (review) {
+          setResultReviews(current => ({
+            ...current,
+            [result.id]: review,
+          }));
+        }
+
+        setReviewedResultCount(index + 1);
+
+        if (index < results.length - 1) {
+          await new Promise(resolve => window.setTimeout(resolve, REVIEW_DELAY_MS));
+        }
+      }
+    };
+
+    void reviewResultsSequentially();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [results, searchPrompt, step]);
+
   const fetchHospitals = async (severityOverride?: string) => {
+    const nextSearchPrompt = buildClinicSearchPrompt({
+      complaint,
+      speciality,
+      severity: severityOverride || severity,
+      duration,
+      location,
+      selectedSymptoms,
+    });
+    const nextSearchPromptDisplay = buildClinicSearchPromptDisplay({
+      complaint,
+      speciality,
+      severity: severityOverride || severity,
+      duration,
+      location,
+      selectedSymptoms,
+    });
+    const nextSearchPromptSummary = await getSearchPromptSummary(
+      complaint,
+      speciality,
+      severityOverride || severity,
+      location,
+      duration,
+      selectedSymptoms,
+    );
+
+    setSearchPrompt(nextSearchPrompt);
+    setSearchPromptDisplay(nextSearchPromptDisplay);
+    setSearchPromptSummary(
+      nextSearchPromptSummary?.summary
+      || `${speciality?.name || 'Medical'} care for ${complaint || 'this concern'} in ${location || 'India'}`
+    );
+    setSearchError(null);
+    setResultReviews({});
+    setReviewedResultCount(0);
     setStep('LOADING');
     try {
       const response = await fetch('/api/hospitals', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-          speciality, 
-          location, 
-          symptoms: selectedSymptoms, 
-          severity: severityOverride || severity, 
-          duration 
+          query: nextSearchPrompt,
+          location,
+          userLat,
+          userLon,
         })
       });
       if (!response.ok) {
-        throw new Error(`Hospital search failed with status ${response.status}`);
+        const errorBody = await response.json().catch(() => null) as { error?: string; details?: { tried?: Array<{ status?: number; message?: string }> } } | null;
+        const triedDetails = errorBody?.details?.tried
+          ?.map(attempt => `HTTP ${attempt.status}: ${attempt.message}`)
+          .join(' | ');
+        throw new Error(triedDetails || errorBody?.error || `Hospital search failed with status ${response.status}`);
       }
-      const data = await response.json();
-      setHospitals(Array.isArray(data.hospitals) ? data.hospitals : []);
+      const data = await response.json() as ClinicSearchResponse;
+      setResults(Array.isArray(data.results) ? data.results : []);
       setStep('RESULT');
     } catch (error) {
       console.error("Failed to fetch hospitals:", error);
-      setHospitals([]);
+      setResults([]);
+      setSearchError(error instanceof Error ? error.message : 'Hospital search failed.');
       setStep('RESULT');
     }
   };
@@ -208,6 +349,7 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
   const currentAnswer = currentQuestion
     ? selectedSymptoms.find(answer => answer.startsWith(`${currentQuestion.question}: `))
     : null;
+  const isSeverityQuestion = Boolean(currentQuestion && /severity|urgent|serious|bad|how bad|how severe|mild|moderate|severe/i.test(currentQuestion.question));
 
   const selectFollowUpAnswer = (answer: string) => {
     if (!currentQuestion) return;
@@ -240,7 +382,6 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
         ? 'Urgent'
         : 'Routine';
 
-    setTriageSummary(triageResult.text);
     setState(prev => ({
       ...prev,
       duration: 'LLM follow-up answers provided',
@@ -249,10 +390,20 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
     await fetchHospitals(finalSeverity);
   };
 
-  const getTriageClass = () => {
-    if (severity === 'Emergency') return { label: 'EMERGENCY', color: 'bg-red-600', text: triageSummary || 'Call 112 immediately. Go to the nearest Emergency Room.' };
-    if (severity === 'Urgent' || severity === 'Severe') return { label: 'URGENT', color: 'bg-orange-600', text: triageSummary || 'Seek medical attention within 24 hours. A specialist should evaluate this.' };
-    return { label: 'ROUTINE', color: 'bg-blue-600', text: triageSummary || 'Schedule a routine visit with a primary care physician or clinic.' };
+  const skipSeverityQuestion = async () => {
+    if (!currentQuestion || !isSeverityQuestion) return;
+
+    if (currentQuestionIndex < followUpQuestions.length - 1) {
+      setCurrentQuestionIndex(prev => prev + 1);
+      return;
+    }
+
+    setState(prev => ({
+      ...prev,
+      severity: 'Medium',
+      duration: 'Severity skipped',
+    }));
+    await fetchHospitals('Medium');
   };
 
   const steps: TriageStep[] = ['COMPLAINT', 'LOCATION_PROMPT', 'SPECIALITY_INFO', 'SYMPTOMS', 'RESULT'];
@@ -262,10 +413,10 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
       initial={{ opacity: 0, y: 20 }} 
       animate={{ opacity: 1, y: 0 }} 
       exit={{ opacity: 0, y: -20 }}
-      className="py-16 px-4 bg-surface min-h-[calc(100vh-80px)]"
+      className={`bg-surface min-h-[calc(100vh-80px)] ${step === 'RESULT' ? 'px-4 py-6' : 'px-4 py-16'}`}
     >
-      <div className="max-w-2xl mx-auto">
-        {step !== 'LOADING' && (
+      <div className={`${step === 'RESULT' ? 'max-w-[1400px]' : 'max-w-2xl'} mx-auto`}>
+        {step !== 'LOADING' && step !== 'RESULT' && (
           <div className="mb-8 flex items-center justify-between">
             <button 
               onClick={() => {
@@ -292,7 +443,7 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
           </div>
         )}
 
-        <div className="bg-white rounded-3xl p-8 md:p-12 shadow-xl shadow-primary/5 border border-slate-100">
+        <div className={step === 'RESULT' ? '' : 'bg-white border border-slate-100 shadow-sm shadow-primary/5 rounded-2xl p-7 md:p-10'}>
           {step === 'COMPLAINT' && (
             <div className="space-y-8">
               <div className="flex flex-col gap-3">
@@ -355,8 +506,8 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
               </div>
               <div className="space-y-3">
                 <h3 className="text-3xl font-display font-bold text-slate-900">Where are you located?</h3>
-                <p className="text-slate-500 max-w-sm mx-auto">
-                  I couldn't use your browser location. Enter your city or area name. You can add a PIN code too, but a PIN code alone is not enough.
+                <p className="text-slate-500 max-w-lg mx-auto">
+                  Pick your location on the India map to continue. Location is required for nearby search.
                 </p>
               </div>
               {locationError && (
@@ -379,6 +530,33 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
                 </motion.div>
               )}
 
+              <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p className="text-left text-sm font-semibold text-slate-700">Select location on map</p>
+                  <p className="text-xs uppercase tracking-[0.16em] text-slate-400">India only</p>
+                </div>
+                <LocationPickerMap
+                  selectedLat={userLat}
+                  selectedLon={userLon}
+                  onPick={(latitude, longitude) => {
+                    void handleMapLocationPick(latitude, longitude);
+                  }}
+                />
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-white px-4 py-3">
+                  <div className="text-left">
+                    <p className="text-xs font-bold uppercase tracking-[0.16em] text-slate-400">Selected area</p>
+                    <p className="mt-1 text-sm font-medium text-slate-700">
+                      {location || 'No map location selected yet'}
+                    </p>
+                  </div>
+                  {userLat != null && userLon != null && (
+                    <p className="text-xs text-slate-500">
+                      {userLat.toFixed(4)}, {userLon.toFixed(4)}
+                    </p>
+                  )}
+                </div>
+              </div>
+
               <div className="relative group">
                 <Search className="absolute left-6 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-primary transition-colors" size={24} />
                 <input 
@@ -393,13 +571,22 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
                   }}
                 />
               </div>
-              <button 
-                disabled={!tempLocation.trim() || isCheckingLocation} 
-                onClick={() => void handleLocationSubmit()}
-                className="w-full btn-primary py-4 text-xl"
-              >
-                {isCheckingLocation ? 'Checking Location...' : 'Set Location →'}
-              </button>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <button 
+                  disabled={!tempLocation.trim() || isCheckingLocation} 
+                  onClick={() => void handleLocationSubmit()}
+                  className="w-full btn-outline py-4 text-xl"
+                >
+                  {isCheckingLocation ? 'Checking...' : 'Use typed location'}
+                </button>
+                <button 
+                  disabled={!location || userLat == null || userLon == null || isCheckingLocation}
+                  onClick={() => setStep('SPECIALITY_INFO')}
+                  className="w-full btn-primary py-4 text-xl"
+                >
+                  {isCheckingLocation ? 'Pinning location...' : 'Use selected location →'}
+                </button>
+              </div>
             </div>
           )}
 
@@ -435,12 +622,16 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
                   </div>
                 </div>
               </div>
-              <p className="text-slate-500 text-center font-medium italic">"Let me ask a few more details to find the best facility near you."</p>
+              <p className="text-slate-500 text-center font-medium italic">
+                {followUpQuestions.length
+                  ? '"I have the basics. Let me confirm the last missing detail before searching."'
+                  : '"I have the key details already. I can search now."'}
+              </p>
               <button 
                 onClick={handleSpecialityContinue}
                 className="w-full btn-primary py-4 text-xl"
               >
-                Continue to Details →
+                {followUpQuestions.length ? 'Continue to Details →' : 'Search Facilities →'}
               </button>
             </div>
           )}
@@ -470,7 +661,7 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
                         <button
                           key={option}
                           onClick={() => selectFollowUpAnswer(option)}
-                          className={`text-left px-6 py-5 rounded-2xl border-2 transition-all font-bold ${isSelected ? 'bg-primary/5 border-primary text-primary' : 'bg-white border-slate-100 text-slate-700 hover:border-slate-200'}`}
+                          className={`text-left px-5 py-4 rounded-xl border transition-all duration-150 font-semibold ${isSelected ? 'bg-primary/5 border-primary/60 text-primary shadow-sm shadow-primary/10' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300 hover:shadow-sm'}`}
                         >
                           {option}
                         </button>
@@ -484,6 +675,15 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
                   >
                     {currentQuestionIndex < followUpQuestions.length - 1 ? 'Continue →' : 'Search Facilities →'}
                   </button>
+                  {isSeverityQuestion && (
+                    <button
+                      type="button"
+                      onClick={() => void skipSeverityQuestion()}
+                      className="w-full btn-outline py-4 text-xl"
+                    >
+                      Skip severity, use Medium
+                    </button>
+                  )}
                 </>
               ) : (
                 <div className="bg-red-50 text-red-600 p-4 rounded-xl text-sm font-medium border border-red-100">
@@ -505,10 +705,12 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
 
           {step === 'RESULT' && (
             <ResultCard 
-              hospitals={hospitals}
-              triageClass={getTriageClass()}
-              duration={duration}
-              selectedSymptoms={selectedSymptoms}
+              results={results}
+              searchPromptDisplay={searchPromptDisplay}
+              searchPromptSummary={searchPromptSummary}
+              searchError={searchError}
+              resultReviews={resultReviews}
+              reviewedResultCount={reviewedResultCount}
               onReset={onReset}
             />
           )}

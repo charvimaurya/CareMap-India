@@ -8,39 +8,6 @@ import { TriageState } from './types';
 
 type LocationStatus = 'detecting' | 'ready' | 'denied' | 'unavailable';
 
-interface ReverseGeocodeResponse {
-  address?: {
-    city?: string;
-    town?: string;
-    village?: string;
-    municipality?: string;
-    county?: string;
-    state?: string;
-  };
-}
-
-const getCityFromCoordinates = async (latitude: number, longitude: number) => {
-  const params = new URLSearchParams({
-    format: 'jsonv2',
-    lat: String(latitude),
-    lon: String(longitude),
-  });
-  const response = await fetch(`https://nominatim.openstreetmap.org/reverse?${params.toString()}`);
-
-  if (!response.ok) {
-    throw new Error(`Reverse geocoding failed with status ${response.status}`);
-  }
-
-  const data = await response.json() as ReverseGeocodeResponse;
-  return data.address?.city
-    || data.address?.town
-    || data.address?.village
-    || data.address?.municipality
-    || data.address?.county
-    || data.address?.state
-    || null;
-};
-
 const INITIAL_STATE: TriageState = {
   step: 'HOME',
   complaint: '',
@@ -48,6 +15,8 @@ const INITIAL_STATE: TriageState = {
   severity: '',
   duration: '',
   location: '',
+  userLat: null,
+  userLon: null,
   speciality: null,
   showSymptoms: true,
   fallbackCount: 0,
@@ -72,25 +41,8 @@ export default function App() {
     }
 
     navigator.geolocation.getCurrentPosition(
-      async (position) => {
-        const { latitude, longitude } = position.coords;
-
-        try {
-          const browserLocation = await getCityFromCoordinates(latitude, longitude);
-          if (!browserLocation) {
-            setLocationStatus('unavailable');
-            return;
-          }
-
-          setState(prev => ({
-            ...prev,
-            location: prev.location || browserLocation,
-          }));
-          setLocationStatus('ready');
-        } catch (error) {
-          console.error("Failed to detect city:", error);
-          setLocationStatus('unavailable');
-        }
+      () => {
+        setLocationStatus('ready');
       },
       (error) => {
         setLocationStatus(error.code === error.PERMISSION_DENIED ? 'denied' : 'unavailable');
@@ -103,7 +55,12 @@ export default function App() {
     );
   }, []);
 
-  const reset = () => setState(prev => ({ ...INITIAL_STATE, location: prev.location }));
+  const reset = () => setState(prev => ({
+    ...INITIAL_STATE,
+    location: '',
+    userLat: null,
+    userLon: null,
+  }));
   const startTriage = () => setState(prev => ({ ...prev, step: 'COMPLAINT' }));
 
   return (

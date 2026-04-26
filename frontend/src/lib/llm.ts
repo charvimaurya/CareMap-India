@@ -1,4 +1,4 @@
-import { SpecialityInfo } from '../types';
+import { ClinicResultReview, ClinicSearchResult, SpecialityInfo } from '../types';
 
 export type ComplaintAnalysis = {
   isValid: boolean;
@@ -7,6 +7,7 @@ export type ComplaintAnalysis = {
   specialityName?: string;
   showSymptoms?: boolean;
   location?: string;
+  severity?: 'Routine' | 'Urgent' | 'Emergency' | '';
   message?: string;
 };
 
@@ -31,16 +32,37 @@ export type TriageResultAnalysis = {
   text: string;
 };
 
-async function postLlm<T>(payload: Record<string, unknown>): Promise<T | null> {
-  try {
-    const response = await fetch('/api/llm/triage', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
+export type SearchSummaryAnalysis = {
+  summary: string;
+};
 
-    if (!response.ok) return null;
-    return await response.json() as T;
+export type SearchResultReviewAnalysis = ClinicResultReview;
+
+const delay = (ms: number) => new Promise(resolve => window.setTimeout(resolve, ms));
+
+async function postLlm<T>(payload: Record<string, unknown>): Promise<T | null> {
+  const maxAttempts = 3;
+
+  try {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const response = await fetch('/api/llm/triage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (response.ok) {
+        return await response.json() as T;
+      }
+
+      if (response.status !== 429 || attempt === maxAttempts - 1) {
+        return null;
+      }
+
+      await delay(1200 * (attempt + 1));
+    }
+
+    return null;
   } catch (error) {
     console.error('LLM request failed:', error);
     return null;
@@ -60,12 +82,18 @@ export const analyzeLocation = (location: string) => postLlm<LocationAnalysis>({
 export const getFollowUpQuestions = (
   complaint: string,
   speciality: SpecialityInfo | null,
-  healthIssues: string[] = []
+  healthIssues: string[] = [],
+  options?: {
+    hasLocation?: boolean;
+    severity?: string;
+  },
 ) => postLlm<FollowUpQuestionAnalysis>({
   type: 'followups',
   complaint,
   specialityName: speciality?.name,
   healthIssues,
+  hasLocation: options?.hasLocation,
+  severity: options?.severity,
 });
 
 export const analyzeTriageResult = (
@@ -77,4 +105,41 @@ export const analyzeTriageResult = (
   complaint,
   specialityName: speciality?.name,
   answers,
+});
+
+export const getSearchPromptSummary = (
+  complaint: string,
+  speciality: SpecialityInfo | null,
+  severity: string,
+  location: string,
+  duration: string,
+  answers: string[]
+) => postLlm<SearchSummaryAnalysis>({
+  type: 'search_summary',
+  complaint,
+  specialityName: speciality?.name,
+  severity,
+  location,
+  duration,
+  answers,
+});
+
+export const reviewSearchResult = (
+  query: string,
+  result: ClinicSearchResult,
+) => postLlm<SearchResultReviewAnalysis>({
+  type: 'result_review',
+  query,
+  result: {
+    name: result.name,
+    facilityType: result.facilityType,
+    city: result.city,
+    state: result.state,
+    country: result.country,
+    specialties: result.specialties,
+    procedures: result.procedures,
+    capabilities: result.capabilities,
+    equipment: result.equipment,
+    document: result.document,
+  },
 });

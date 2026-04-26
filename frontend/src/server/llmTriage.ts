@@ -1,7 +1,11 @@
 import type { ServerResponse } from 'node:http';
 import type { Connect } from 'vite';
 
+const ZAI_MODEL = 'glm-5.1';
 const GROQ_MODEL = 'llama-3.1-8b-instant';
+const OPENROUTER_MODEL_POOL = [
+  'minimax/minimax-m2.5:free',
+] as const;
 
 const SYSTEM_PROMPT = `You are a strict medical triage intake assistant for CareMap India.
 You do not diagnose, prescribe, or give treatment advice.
@@ -27,13 +31,48 @@ Sensible follow-up examples:
 - Mental health: ask main concern, immediate safety risk, and sleep/appetite impact.`;
 
 type TriagePayload = {
-  type?: 'complaint' | 'location' | 'followups' | 'triage_result';
+  type?: 'complaint' | 'location' | 'followups' | 'triage_result' | 'search_summary' | 'result_review';
   complaint?: string;
   healthIssues?: string[];
   answers?: string[];
   location?: string;
+  hasLocation?: boolean;
   specialityName?: string;
+  severity?: string;
+  duration?: string;
+  query?: string;
+  result?: {
+    name?: string;
+    facilityType?: string;
+    city?: string;
+    state?: string;
+    country?: string;
+    specialties?: string[];
+    procedures?: string[];
+    capabilities?: string[];
+    equipment?: string[];
+    document?: string;
+  };
 };
+
+type ProviderResponse = {
+  choices?: Array<{
+    message?: {
+      content?: string;
+      reasoning_content?: string;
+    };
+  }>;
+};
+
+type ProviderAttemptResult = {
+  ok: boolean;
+  status: number;
+  providerLabel: string;
+  data: ProviderResponse | null;
+  content: string;
+};
+
+let reviewProviderCursor = 0;
 
 const readJsonBody = (req: Connect.IncomingMessage) => new Promise<TriagePayload>((resolve, reject) => {
   let body = '';
@@ -96,6 +135,7 @@ Return only JSON:
   "specialityName": "Orthopaedics" | "Cardiology" | "General Medicine" | "Gastroenterology" | "Neurology" | "Ophthalmology" | "Obstetrics & Gynaecology" | "Paediatrics" | "Dermatology" | "Psychiatry" | "Dentistry" | "Oncology" | "Nephrology" | "Endocrinology",
   "showSymptoms": boolean,
   "location": string,
+  "severity": "Routine" | "Urgent" | "Emergency" | "",
   "message": string
 }
 
@@ -107,6 +147,7 @@ Rules:
 - normalizedComplaint should keep all meaningful health details in natural language, not only the first issue.
 - specialityName should be the best primary speciality for the whole combination. If there are dangerous symptoms such as chest pain, breathlessness, loss of consciousness, stroke signs, severe bleeding, or head injury, prioritize the speciality/facility path that best handles the urgent risk.
 - location should contain an Indian city, town, area, or city/area plus PIN found in the input, corrected if needed. A bare PIN/postcode alone is not enough; if only a PIN is present, return an empty string for location.
+- severity should be "Emergency", "Urgent", or "Routine" only when the user already made that urgency clear from the initial message. Otherwise return an empty string.
 - message should be a short helpful retry message if invalid, otherwise an empty string.`;
   }
 
@@ -152,10 +193,60 @@ Rules:
 - text should be one short action sentence for the user.`;
   }
 
+  if (payload.type === 'search_summary') {
+    return `Summarize this care-facility search context for a compact map search box.
+Complaint: "${payload.complaint || ''}"
+Speciality: "${payload.specialityName || 'General Medicine'}"
+Urgency: "${payload.severity || 'Routine'}"
+Location: "${payload.location || 'India'}"
+Duration: "${payload.duration || 'Not specified'}"
+Follow-up answers: ${JSON.stringify(payload.answers || [])}
+
+Return only JSON:
+{
+  "summary": string
+}
+
+Rules:
+- summary must be a single short sentence, ideally 8 to 18 words.
+- Mention the complaint, speciality or urgency, and the location when useful.
+- Do not mention "LLM", "prompt", or "follow-up answers".
+- Do not add diagnosis, prescription, or treatment advice.
+- Keep it natural and scannable for a search UI.`;
+  }
+
+  if (payload.type === 'result_review') {
+    return `Review whether this clinic search result is actually relevant to the user's search query.
+Search query: "${payload.query || ''}"
+Result JSON: ${JSON.stringify(payload.result || {})}
+
+Return only JSON:
+{
+  "verdict": "positive" | "mixed" | "negative",
+  "score": number,
+  "summary": string,
+  "reasoning": string
+}
+
+Rules:
+- score must be an integer from 0 to 100.
+- positive means the result is clearly relevant and useful (even if partially supported) for the query.
+- mixed means it is not so relevant, not supported, or uncertain.
+- negative means it is clearly mismatched or unhelpful for the query.
+- Compare the query against speciality, procedures, capabilities, and the summary text in the result.
+- Penalize speciality mismatch heavily. Example: dentistry for knee surgery should be negative.
+- summary must be one short sentence, ideally 8 to 16 words.
+- reasoning must be 1 to 3 concise sentences explaining the score.
+- try to give a positive score when the hint is clear.
+- Do not mention "LLM", "AI", "vector search", "ranking algorithm", or JSON.`;
+  }
+
   return `Generate adaptive follow-up questions for this triage case.
 Complaint: "${payload.complaint || ''}"
 Health issues: ${JSON.stringify(payload.healthIssues || [])}
 Speciality: "${payload.specialityName || 'General Medicine'}"
+Location already known: ${payload.hasLocation ? 'yes' : 'no'}
+Severity already known: "${payload.severity || ''}"
 
 Return only JSON:
 {
@@ -169,35 +260,202 @@ Return only JSON:
 }
 
 Rules:
-- Return 2 to 4 questions.
+- Your goal is to collect only the missing essentials needed for search: exact medical problem/treatment intent, location, and severity.
+- The actual problem and the location are mandatory. They cannot be skipped.
+- Severity is optional. If the user skips it, the app will use Medium.
+- Do not ask about symptoms.
+- Return 0 to 2 questions, not more.
 - Each question must have 3 to 5 short options.
 - Options must be concise, patient-friendly, and mutually distinct.
+- If the complaint already clearly states the medical issue or treatment being sought, do not ask the user to restate it.
+- If location is already known, do not ask location.
+- If severity is already known, do not ask severity.
+- If only one essential is missing, return exactly one question.
+- If nothing important is missing, return an empty questions array.
 - Ask about all listed health issues when there is more than one, but combine related issues into one question when possible.
-- If Health issues is empty, infer all health issues from Complaint and still cover the whole complaint.
-- Ask only sensible questions for the complaint. Do not always ask duration.
-- Include one urgency/red-flag question when clinically relevant.
+- If Health issues is empty, infer all health issues from Complaint and only ask to clarify if the complaint is too vague.
+- Ask only sensible questions for the complaint. Do not ask duration.
+- Prefer a single severity question when clinically relevant.
 - Do not ask for personal identity, phone number, payment, or insurance.
 
 Good examples:
-- Injury or fall: ask "Which body part is hurt?" with options like "Arm", "Leg", "Back", "Head"; ask "Can you move or bear weight?" with options like "Yes", "Painfully", "No"; ask about swelling/deformity or bleeding if relevant.
-- Possible fracture: ask body part, visible deformity/swelling, numbness/weakness.
-- Fever or infection: ask temperature range, associated symptoms, and danger signs like breathing trouble/confusion/rash.
-- Cancer: do not ask only "How long?". Ask "What do you need help with?" options "New lump", "Known cancer", "Treatment side effect", "Follow-up"; ask "Known type or stage?" options "Type known", "Stage known", "Not sure"; ask current concern such as pain, weight loss, bleeding, treatment side effects.
-- Pregnancy: ask weeks/months pregnant, bleeding or pain, fetal movement if late pregnancy.
-- Dental pain: ask tooth/gum/jaw location, face swelling, fever, trouble opening mouth.
-- Chest pain: ask pain type, breathlessness/sweating, radiation to arm/jaw.
-- Mental health: ask main concern, safety risk, sleep/appetite impact.
-- Multiple complaints: ask one question that links symptoms when useful, such as "Which symptom worries you most?", "Any breathing trouble or chest pressure?", or "Any dehydration signs?", then ask issue-specific questions for the remaining major concerns.`;
+- Injury or fall: if the body part is already clear, only ask severity.
+- Possible fracture: only ask severity if the body part is already clear.
+- Fever or infection: only ask severity if the illness is already clearly described.
+- Cancer: if the cancer or treatment intent is already clear, only ask severity.
+- Pregnancy: if pregnancy is already clear, only ask severity.
+- Dental pain: if the issue is already clear, only ask severity.
+- Chest pain: if the issue is already clear, only ask severity.
+- Mental health: if the issue is already clear, only ask severity.
+- Multiple complaints: ask the one missing essential first, then severity only if needed.`;
 };
 
-export const createLlmTriageMiddleware = (apiKey?: string): Connect.NextHandleFunction => async (req, res, next) => {
+const requestZai = async (apiKey: string, payload: TriagePayload) => {
+  const response = await fetch('https://api.z.ai/api/paas/v4/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: ZAI_MODEL,
+      temperature: 0,
+      response_format: { type: 'json_object' },
+      thinking: { type: 'disabled' },
+      messages: [
+        {
+          role: 'system',
+          content: SYSTEM_PROMPT,
+        },
+        {
+          role: 'user',
+          content: buildPrompt(payload),
+        },
+      ],
+    }),
+  });
+
+  const data = await response.json() as ProviderResponse;
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    providerLabel: `zai:${ZAI_MODEL}`,
+    data,
+    content: data.choices?.[0]?.message?.content || '',
+  };
+};
+
+const requestGroq = async (apiKey: string, payload: TriagePayload) => {
+  const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      temperature: 0,
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system',
+          content: SYSTEM_PROMPT,
+        },
+        {
+          role: 'user',
+          content: buildPrompt(payload),
+        },
+      ],
+    }),
+  });
+
+  const data = await response.json() as ProviderResponse;
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    providerLabel: `groq:${GROQ_MODEL}`,
+    data,
+    content: data.choices?.[0]?.message?.content || '',
+  };
+};
+
+const requestOpenRouter = async (
+  apiKey: string,
+  model: typeof OPENROUTER_MODEL_POOL[number],
+  payload: TriagePayload,
+): Promise<ProviderAttemptResult> => {
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'http://localhost:3000',
+      'X-Title': 'CareMap India Frontend',
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0,
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system',
+          content: SYSTEM_PROMPT,
+        },
+        {
+          role: 'user',
+          content: buildPrompt(payload),
+        },
+      ],
+    }),
+  });
+
+  const data = await response.json() as ProviderResponse;
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    providerLabel: `openrouter:${model}`,
+    data,
+    content: data.choices?.[0]?.message?.content || '',
+  };
+};
+
+const requestReviewWithRoundRobin = async (
+  payload: TriagePayload,
+  options: {
+    openRouterApiKey?: string;
+    groqApiKey?: string;
+    zaiApiKey?: string;
+  },
+) => {
+  const providerFns: Array<() => Promise<ProviderAttemptResult>> = [];
+
+  if (options.openRouterApiKey) {
+    OPENROUTER_MODEL_POOL.forEach(model => {
+      providerFns.push(() => requestOpenRouter(options.openRouterApiKey as string, model, payload));
+    });
+  }
+
+  if (options.groqApiKey) {
+    providerFns.push(() => requestGroq(options.groqApiKey, payload));
+  }
+
+  if (options.zaiApiKey) {
+    providerFns.push(() => requestZai(options.zaiApiKey, payload));
+  }
+
+  if (!providerFns.length) return null;
+
+  const startingIndex = reviewProviderCursor % providerFns.length;
+  reviewProviderCursor = (reviewProviderCursor + 1) % providerFns.length;
+
+  for (let offset = 0; offset < providerFns.length; offset += 1) {
+    const providerIndex = (startingIndex + offset) % providerFns.length;
+    const attempt = await providerFns[providerIndex]();
+    if (attempt.ok && attempt.content.trim()) {
+      return {
+        ...attempt,
+      };
+    }
+  }
+
+  return null;
+};
+
+export const createLlmTriageMiddleware = (
+  zaiApiKey?: string,
+  groqApiKey?: string,
+  openRouterApiKey?: string,
+): Connect.NextHandleFunction => async (req, res, next) => {
   if (req.url !== '/api/llm/triage' || req.method !== 'POST') {
     next();
     return;
   }
 
-  if (!apiKey) {
-    sendJson(res, 503, { error: 'GROQ_API_KEY is not configured.' });
+  if (!zaiApiKey && !groqApiKey && !openRouterApiKey) {
+    sendJson(res, 503, { error: 'No LLM provider key is configured.' });
     return;
   }
 
@@ -217,38 +475,50 @@ export const createLlmTriageMiddleware = (apiKey?: string): Connect.NextHandleFu
       return;
     }
 
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: GROQ_MODEL,
-        temperature: 0,
-        response_format: { type: 'json_object' },
-        messages: [
-          {
-            role: 'system',
-            content: SYSTEM_PROMPT,
-          },
-          {
-            role: 'user',
-            content: buildPrompt(payload),
-          },
-        ],
-      }),
-    });
+    const successfulResponse = payload.type === 'result_review'
+      ? await requestReviewWithRoundRobin(payload, {
+        openRouterApiKey,
+        groqApiKey,
+        zaiApiKey,
+      })
+      : (() => undefined)();
 
-    if (!response.ok) {
-      sendJson(res, response.status, { error: 'LLM request failed.' });
+    const defaultProviderResponse = payload.type !== 'result_review'
+      ? (payload.type === 'followups' && groqApiKey
+        ? await requestGroq(groqApiKey, payload)
+        : zaiApiKey
+          ? await requestZai(zaiApiKey, payload)
+          : groqApiKey
+            ? await requestGroq(String(groqApiKey), payload)
+            : null)
+      : null;
+
+    const fallbackResponse = payload.type !== 'result_review'
+      && payload.type !== 'followups'
+      && defaultProviderResponse
+      && !defaultProviderResponse.ok
+      && groqApiKey
+      && zaiApiKey
+      ? await requestGroq(groqApiKey, payload)
+      : null;
+
+    const resolvedResponse = payload.type === 'result_review'
+      ? successfulResponse
+      : defaultProviderResponse?.ok
+        ? defaultProviderResponse
+        : fallbackResponse?.ok
+          ? fallbackResponse
+          : null;
+
+    if (!resolvedResponse) {
+      const status = payload.type === 'result_review'
+        ? 429
+        : (fallbackResponse || defaultProviderResponse)?.status || 500;
+      sendJson(res, status, { error: 'LLM request failed.' });
       return;
     }
 
-    const data = await response.json() as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
-    const content = data.choices?.[0]?.message?.content || '';
+    const content = resolvedResponse.data?.choices?.[0]?.message?.content || '';
     const parsed = extractJsonObject(content);
 
     if (!parsed) {
@@ -272,6 +542,21 @@ export const createLlmTriageMiddleware = (apiKey?: string): Connect.NextHandleFu
     if (payload.type === 'triage_result' && hasEmergencyDangerSigns(payload)) {
       parsed.label = 'EMERGENCY';
       parsed.text = 'This may need immediate emergency care. Call 112 or go to the nearest emergency department now.';
+    }
+
+    if (payload.type === 'result_review') {
+      const normalizedVerdict = String(parsed.verdict || '').toLowerCase();
+      parsed.verdict = normalizedVerdict === 'positive' || normalizedVerdict === 'negative' ? normalizedVerdict : 'mixed';
+      const numericScore = Number(parsed.score);
+      parsed.score = Number.isFinite(numericScore)
+        ? Math.max(0, Math.min(100, Math.round(numericScore)))
+        : parsed.verdict === 'positive'
+          ? 80
+          : parsed.verdict === 'negative'
+            ? 20
+            : 50;
+      parsed.summary = String(parsed.summary || 'The result shows a moderate match to the search.');
+      parsed.reasoning = String(parsed.reasoning || 'This result has limited supporting evidence for the search.');
     }
 
     sendJson(res, 200, parsed);

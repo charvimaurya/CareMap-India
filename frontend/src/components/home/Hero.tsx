@@ -28,11 +28,10 @@ export const Hero: React.FC<HeroProps> = ({ onStart }) => {
           </p>
         </div>
 
-        <div className="flex flex-col sm:flex-row gap-4 justify-center">
+        <div className="flex justify-center">
           <button onClick={onStart} className="btn-primary flex items-center justify-center gap-2 text-lg">
             Start Triage Now <ArrowRight size={20} />
           </button>
-          <button className="btn-outline">Nearest Emergency Centers</button>
         </div>
 
         <div className="grid md:grid-cols-3 gap-8 pt-20">

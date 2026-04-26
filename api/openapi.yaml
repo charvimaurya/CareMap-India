@@ -1,0 +1,516 @@
+openapi: 3.1.0
+info:
+  title: CareMap India API
+  version: 1.0.0
+  description: |
+    Frontend-facing schema for the CareMap India clinic search API.
+
+    Auth:
+    - Protected endpoints require `Authorization: Bearer <token>`
+    - The token value is configured on the server with `API_BEARER_TOKEN`
+
+    Search behavior:
+    - `POST /rag-search` and `POST /search` are equivalent
+    - `n_results` defaults to `20`
+    - When `user_lat` and `user_lon` are provided, the API uses a geo-prefilter-first flow
+      and only considers clinics within the configured search radius
+    - The default geo radius is currently `100 km`
+servers:
+  - url: http://localhost:5001
+    description: Local development
+security:
+  - bearerAuth: []
+paths:
+  /health:
+    get:
+      summary: Health check and runtime configuration
+      operationId: getHealth
+      responses:
+        "200":
+          description: Service health payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "401":
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /rag-search:
+    post:
+      summary: Search clinics using natural language
+      operationId: searchClinics
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchRequest"
+            examples:
+              semanticOnly:
+                summary: Semantic search without user coordinates
+                value:
+                  query: retina clinic for cataract surgery
+                  city: Delhi
+                  state: Delhi
+                  n_results: 20
+                  enrich: false
+              geoSearch:
+                summary: Search near a user-selected location
+                value:
+                  query: eye hospital for cataract surgery
+                  user_lat: 28.6139
+                  user_lon: 77.209
+                  n_results: 20
+                  enrich: true
+                  enrich_top_k: 3
+      responses:
+        "200":
+          description: Ranked clinic search results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResponse"
+        "400":
+          description: Invalid request payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: Search execution failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Missing required backend configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /search:
+    post:
+      summary: Alias for /rag-search
+      operationId: searchClinicsAlias
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchRequest"
+      responses:
+        "200":
+          description: Ranked clinic search results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResponse"
+        "400":
+          description: Invalid request payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: Search execution failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Missing required backend configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque token
+  schemas:
+    SearchRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - query
+      properties:
+        query:
+          type: string
+          minLength: 1
+          description: Natural-language medical search query
+          example: retina clinic for cataract surgery
+        n_results:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 20
+          description: Number of results to return
+        city:
+          type:
+            - string
+            - "null"
+          description: Optional city filter
+          example: Delhi
+        state:
+          type:
+            - string
+            - "null"
+          description: Optional state filter
+          example: Delhi
+        country:
+          type:
+            - string
+            - "null"
+          description: Optional country filter
+          example: India
+        facility_type:
+          type:
+            - string
+            - "null"
+          description: Optional facility type filter
+          example: hospital
+        user_lat:
+          type:
+            - number
+            - "null"
+          minimum: -90
+          maximum: 90
+          description: |
+            User latitude. Must be supplied together with `user_lon`.
+            When both are supplied, the API applies geo-prefiltering before semantic ranking.
+          example: 28.6139
+        user_lon:
+          type:
+            - number
+            - "null"
+          minimum: -180
+          maximum: 180
+          description: |
+            User longitude. Must be supplied together with `user_lat`.
+          example: 77.209
+        enrich:
+          type: boolean
+          default: false
+          description: |
+            If true, enriches top results using Tavily to try to resolve official website and opening hours.
+        enrich_top_k:
+          type: integer
+          minimum: 0
+          maximum: 5
+          default: 3
+          description: How many top results to enrich when `enrich=true`
+    SearchResponse:
+      type: object
+      required:
+        - query
+        - count
+        - filters
+        - model_info
+        - retrieval_info
+        - results
+      properties:
+        query:
+          type: string
+        count:
+          type: integer
+          minimum: 0
+        filters:
+          $ref: "#/components/schemas/SearchFilters"
+        model_info:
+          $ref: "#/components/schemas/ModelInfo"
+        retrieval_info:
+          $ref: "#/components/schemas/RetrievalInfo"
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClinicSearchResult"
+    SearchFilters:
+      type: object
+      required:
+        - city
+        - state
+        - country
+        - facility_type
+        - user_lat
+        - user_lon
+        - enrich
+        - enrich_top_k
+        - max_distance_km
+      properties:
+        city:
+          type:
+            - string
+            - "null"
+        state:
+          type:
+            - string
+            - "null"
+        country:
+          type:
+            - string
+            - "null"
+        facility_type:
+          type:
+            - string
+            - "null"
+        user_lat:
+          type:
+            - number
+            - "null"
+        user_lon:
+          type:
+            - number
+            - "null"
+        enrich:
+          type: boolean
+        enrich_top_k:
+          type: integer
+        max_distance_km:
+          type:
+            - number
+            - "null"
+          description: Effective geo radius applied by the backend when user coordinates are provided
+    ModelInfo:
+      type: object
+      required:
+        - embedding_model
+        - collection_name
+      properties:
+        embedding_model:
+          type: string
+          example: text-embedding-3-small
+        collection_name:
+          type: string
+          example: clinics_rag
+    RetrievalInfo:
+      type: object
+      description: |
+        Search strategy metadata. The exact shape depends on whether geo-prefiltering was used.
+      required:
+        - mode
+      properties:
+        mode:
+          type: string
+          enum:
+            - vector_only
+            - geo_prefilter_then_vector
+        candidate_count:
+          type: integer
+          minimum: 0
+          description: Present in `vector_only` mode
+        prefilter_candidate_count:
+          type: integer
+          minimum: 0
+          description: Present in `geo_prefilter_then_vector` mode
+        vector_candidate_count:
+          type: integer
+          minimum: 0
+          description: Present in `geo_prefilter_then_vector` mode
+        max_distance_km:
+          type: number
+          description: Present in `geo_prefilter_then_vector` mode
+      additionalProperties: false
+    ClinicSearchResult:
+      type: object
+      required:
+        - rank
+        - id
+        - document
+        - metadata
+        - vector_distance
+        - semantic_score
+        - field_score
+        - field_breakdown
+        - total_score
+      properties:
+        rank:
+          type: integer
+          minimum: 1
+        id:
+          type: string
+          description: Stable clinic record ID used in the vector store
+        document:
+          type: string
+          description: Embedded text chunk used for ranking
+        metadata:
+          $ref: "#/components/schemas/ClinicMetadata"
+        vector_distance:
+          type: number
+          description: Raw vector distance returned by Chroma; lower is better
+        semantic_score:
+          type: number
+          description: Derived score from vector distance; higher is better
+        field_score:
+          type: number
+          description: Weighted score from explicit matches on specialties, procedures, equipment, capability
+        field_breakdown:
+          $ref: "#/components/schemas/FieldBreakdown"
+        total_score:
+          type: number
+          description: Final backend ranking score
+        distance_km:
+          type: number
+          description: Present when user coordinates were provided
+        enrichment:
+          $ref: "#/components/schemas/ClinicEnrichment"
+    FieldBreakdown:
+      type: object
+      required:
+        - specialties
+        - procedure
+        - equipment
+        - capability
+      properties:
+        specialties:
+          type: number
+        procedure:
+          type: number
+        equipment:
+          type: number
+        capability:
+          type: number
+      additionalProperties: false
+    ClinicEnrichment:
+      type: object
+      required:
+        - website
+      properties:
+        website:
+          type: string
+          format: uri
+        opening_hours:
+          type: string
+      additionalProperties: false
+    ClinicMetadata:
+      type: object
+      description: |
+        Raw clinic metadata returned from Chroma. Known fields are listed below.
+        Additional fields may be added later, so frontend code should ignore unknown keys.
+      properties:
+        name:
+          type: string
+        officialPhone:
+          type: string
+        email:
+          type: string
+        address_city:
+          type: string
+        address_stateOrRegion:
+          type: string
+        address_country:
+          type: string
+        latitude:
+          type: number
+        longitude:
+          type: number
+        facilityTypeId:
+          type: string
+        operatorTypeId:
+          type: string
+        yearEstablished:
+          type: integer
+        numberDoctors:
+          type: integer
+        capacity:
+          type: integer
+        name_json:
+          type: string
+          description: JSON-encoded list
+        specialties_json:
+          type: string
+          description: JSON-encoded list
+        procedure_json:
+          type: string
+          description: JSON-encoded list
+        equipment_json:
+          type: string
+          description: JSON-encoded list
+        capability_json:
+          type: string
+          description: JSON-encoded list
+        phone_numbers_json:
+          type: string
+          description: JSON-encoded list
+        websites_json:
+          type: string
+          description: JSON-encoded list
+      additionalProperties: true
+    HealthResponse:
+      type: object
+      required:
+        - status
+        - model_info
+        - components
+      properties:
+        status:
+          type: string
+          enum:
+            - ok
+            - degraded
+        model_info:
+          $ref: "#/components/schemas/ModelInfo"
+        components:
+          type: object
+          required:
+            - openai
+            - chroma
+            - tavily
+          properties:
+            openai:
+              type: object
+              required:
+                - configured
+                - embedding_model
+              properties:
+                configured:
+                  type: boolean
+                embedding_model:
+                  type: string
+              additionalProperties: false
+            chroma:
+              type: object
+              required:
+                - configured
+                - collection_name
+              properties:
+                configured:
+                  type: boolean
+                collection_name:
+                  type: string
+              additionalProperties: false
+            tavily:
+              type: object
+              required:
+                - configured
+              properties:
+                configured:
+                  type: boolean
+              additionalProperties: false
+          additionalProperties: false
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+        details:
+          type: object
+          additionalProperties: true

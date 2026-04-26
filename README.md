@@ -18,9 +18,7 @@ From a business perspective, CareMap India sits at the first and most critical t
 
 The technology is built to scale. The problem it solves is urgent, universal, and almost entirely unsolved. In a country of 1.4 billion people, near enough is not good enough.
 
-## Demo Video
 
-- Demo Link: [Add your demo video URL here](https://example.com/demo)
 
 ---
 

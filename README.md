@@ -15,6 +15,21 @@ Export the required environment variables in your shell, then run:
 python api/app.py
 ```
 
+Install dependencies with the project requirements before running. The Chroma Cloud integration expects a modern `chromadb` release:
+
+```bash
+pip install -r requirements.txt
+```
+
+Chroma Cloud connection settings can also be overridden explicitly:
+
+```bash
+export CHROMA_HOST=europe-west1.gcp.trychroma.com
+export CHROMA_PORT=443
+```
+
+The `/health` route verifies real collection access, not just whether the Chroma env vars exist.
+
 ## Docker run
 
 Build:

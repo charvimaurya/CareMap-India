@@ -1,6 +1,7 @@
 import argparse
 import csv
 import hashlib
+import importlib.metadata
 import json
 import math
 import os
@@ -19,10 +20,12 @@ from openai import OpenAI
 ROOT_DIR = Path(__file__).resolve().parent
 CSV_FILE = ROOT_DIR / "db" / "dataset_raw.csv"
 GEO_INDEX_FILE = ROOT_DIR / "db" / "clinic_geo_index.json"
-DEFAULT_COLLECTION_NAME = "clinics_rag"
-DEFAULT_EMBED_MODEL = "text-embedding-3-small"
+DEFAULT_COLLECTION_NAME = "clinics_rag_v2"
+DEFAULT_EMBED_MODEL = "text-embedding-3-large"
 DEFAULT_RESULTS = 20
 DEFAULT_MAX_DISTANCE_KM = 100.0
+DEFAULT_CHROMA_HOST = "europe-west1.gcp.trychroma.com"
+DEFAULT_CHROMA_PORT = 443
 MAX_GEO_CANDIDATES = 1500
 CHROMA_GET_BATCH_SIZE = 250
 FIELD_WEIGHTS = {
@@ -154,10 +157,33 @@ def get_embed_model() -> str:
     )
 
 
+def get_chroma_host() -> str:
+    return clean_value(os.getenv("CHROMA_HOST")) or DEFAULT_CHROMA_HOST
+
+
+def get_chroma_port() -> int:
+    value = clean_value(os.getenv("CHROMA_PORT"))
+    if not value:
+        return DEFAULT_CHROMA_PORT
+
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise SearchConfigurationError("CHROMA_PORT must be an integer.") from exc
+
+
 def get_runtime_config() -> dict[str, Any]:
+    try:
+        chromadb_version = importlib.metadata.version("chromadb")
+    except importlib.metadata.PackageNotFoundError:
+        chromadb_version = "unknown"
+
     return {
         "collection_name": get_collection_name(),
         "embedding_model": get_embed_model(),
+        "chroma_host": get_chroma_host(),
+        "chroma_port": get_chroma_port(),
+        "chromadb_version": chromadb_version,
         "embedding_model_env": (
             "CLINIC_SEARCH_EMBED_MODEL"
             if clean_value(os.getenv("CLINIC_SEARCH_EMBED_MODEL"))
@@ -185,8 +211,8 @@ def get_openai_client() -> OpenAI:
 
 def get_chroma_collection():
     chroma_client = chromadb.CloudClient(
-        cloud_port=443,
-        cloud_host="europe-west1.gcp.trychroma.com",
+        cloud_port=get_chroma_port(),
+        cloud_host=get_chroma_host(),
         api_key=require_env("CHROMA_API_KEY"),
         tenant=require_env("CHROMA_TENANT"),
         database=require_env("CHROMA_DATABASE"),
@@ -503,54 +529,154 @@ def global_semantic_search(
     country: Optional[str],
     facility_type: Optional[str],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    candidate_count = min(max(n_results * 5, 50), 200)
-    query_args = {
-        "query_embeddings": [query_embedding],
-        "n_results": candidate_count,
-        "include": ["documents", "metadatas", "distances"],
-    }
-    where = build_where(city=city, state=state, country=country, facility_type=facility_type)
-    if where:
-        query_args["where"] = where
+    # Use the hybrid pipeline from search.py: acronym expansion + bucket
+    # pre-filter + dense ANN + BM25 + RRF merge + cross-encoder rerank.
+    from search import (
+        BM25_TOPK,
+        DENSE_TOPK,
+        RERANK_TOPK,
+        bm25_search,
+        classify_query,
+        expand_acronyms,
+        rerank,
+        rrf_merge,
+    )
 
-    results = collection.query(**query_args)
-    ids = results["ids"][0]
-    documents = results["documents"][0]
-    metadatas = results["metadatas"][0]
-    distances = results["distances"][0]
-    reranked = []
+    expanded_query = expand_acronyms(query)
 
-    query_text = normalize_text(query)
-    query_tokens = tokenize(query)
-    for clinic_id, document, metadata, distance in zip(ids, documents, metadatas, distances):
-        semantic_score = 1.0 / (1.0 + max(float(distance), 0.0))
-        field_score = 0.0
-        field_breakdown = {}
-        for field, weight in FIELD_WEIGHTS.items():
-            values = parse_json_list(metadata.get(f"{field}_json"))
-            match_score = score_field_matches(query_text, query_tokens, values)
-            weighted_score = match_score * weight
-            field_breakdown[field] = round(weighted_score, 3)
-            field_score += weighted_score
+    explicit_where = build_where(
+        city=city, state=state, country=country, facility_type=facility_type
+    )
+    classification = classify_query(query)
+    bucket_filter = (
+        {f"bucket_{classification['bucket']}": True}
+        if classification.get("bucket")
+        else None
+    )
 
-        reranked.append({
-            "id": clinic_id,
-            "document": document,
-            "metadata": metadata,
-            "distance": float(distance),
-            "semantic_score": semantic_score,
-            "field_score": field_score,
-            "field_breakdown": field_breakdown,
-            "total_score": field_score + (semantic_score * 0.35),
+    if explicit_where and bucket_filter:
+        if "$and" in explicit_where:
+            combined_where = {"$and": explicit_where["$and"] + [bucket_filter]}
+        else:
+            combined_where = {"$and": [explicit_where, bucket_filter]}
+    else:
+        combined_where = explicit_where or bucket_filter
+
+    candidate_count = max(DENSE_TOPK, n_results * 5)
+
+    # Reuse the caller's embedding when the query wasn't expanded; only spend
+    # another OpenAI call when acronym expansion actually changed the text.
+    if expanded_query == query:
+        dense_embedding = query_embedding
+    else:
+        dense_embedding = embed_query(get_openai_client(), expanded_query)
+
+    def _run_dense(where: Optional[dict[str, Any]]) -> dict[str, Any]:
+        args = {
+            "query_embeddings": [dense_embedding],
+            "n_results": candidate_count,
+            "include": ["documents", "metadatas", "distances"],
+        }
+        if where:
+            args["where"] = where
+        return collection.query(**args)
+
+    try:
+        dense_results = _run_dense(combined_where)
+    except Exception:
+        dense_results = _run_dense(explicit_where)
+
+    dense_hits: list[dict[str, Any]] = []
+    if dense_results.get("ids") and dense_results["ids"][0]:
+        for clinic_id, document, metadata, distance in zip(
+            dense_results["ids"][0],
+            dense_results["documents"][0],
+            dense_results["metadatas"][0],
+            dense_results["distances"][0],
+        ):
+            distance_value = float(distance)
+            dense_hits.append({
+                "id":             clinic_id,
+                "document":       document,
+                "metadata":       metadata or {},
+                "distance":       distance_value,
+                "semantic_score": 1.0 / (1.0 + max(distance_value, 0.0)),
+            })
+
+    bm25_raw = bm25_search(expanded_query, combined_where, BM25_TOPK)
+    bm25_hits: list[dict[str, Any]] = []
+    for hit in bm25_raw:
+        bm25_hits.append({
+            "id":             hit["id"],
+            "document":       hit["text"],
+            "metadata":       hit["metadata"] or {},
+            "distance":       1.0,
+            "semantic_score": 0.0,
+            "bm25_score":     hit["score"],
         })
 
-    reranked.sort(
-        key=lambda item: (item["total_score"], item["semantic_score"]),
-        reverse=True,
-    )
-    return reranked[:n_results], {
-        "mode": "vector_only",
-        "candidate_count": len(reranked),
+    # If the bucket filter excluded everything from both channels, retry without it.
+    if bucket_filter and not dense_hits and not bm25_hits:
+        try:
+            dense_results = _run_dense(explicit_where)
+        except Exception:
+            dense_results = _run_dense(None)
+        if dense_results.get("ids") and dense_results["ids"][0]:
+            for clinic_id, document, metadata, distance in zip(
+                dense_results["ids"][0],
+                dense_results["documents"][0],
+                dense_results["metadatas"][0],
+                dense_results["distances"][0],
+            ):
+                distance_value = float(distance)
+                dense_hits.append({
+                    "id":             clinic_id,
+                    "document":       document,
+                    "metadata":       metadata or {},
+                    "distance":       distance_value,
+                    "semantic_score": 1.0 / (1.0 + max(distance_value, 0.0)),
+                })
+        bm25_hits = [
+            {
+                "id":             hit["id"],
+                "document":       hit["text"],
+                "metadata":       hit["metadata"] or {},
+                "distance":       1.0,
+                "semantic_score": 0.0,
+                "bm25_score":     hit["score"],
+            }
+            for hit in bm25_search(expanded_query, explicit_where, BM25_TOPK)
+        ]
+
+    # Patch BM25-only hits with dense distance/semantic_score where we have it.
+    dense_lookup = {h["id"]: h for h in dense_hits}
+    merged = rrf_merge(dense_hits, bm25_hits)
+    for item in merged:
+        if item["id"] in dense_lookup:
+            item["distance"] = dense_lookup[item["id"]]["distance"]
+            item["semantic_score"] = dense_lookup[item["id"]]["semantic_score"]
+
+    reranked = rerank(query, merged, RERANK_TOPK)
+
+    bm25_lookup = {h["id"]: h for h in bm25_hits}
+    out: list[dict[str, Any]] = []
+    for item in reranked[:n_results]:
+        bm25_score = float(bm25_lookup.get(item["id"], {}).get("bm25_score", 0.0))
+        rerank_score = float(item.get("rerank", 0.0))
+        out.append({
+            "id":               item["id"],
+            "document":         item["document"],
+            "metadata":         item["metadata"],
+            "distance":         float(item.get("distance", 1.0)),
+            "semantic_score":   float(item.get("semantic_score", 0.0)),
+            "field_score":      bm25_score,
+            "field_breakdown":  {"bm25": round(bm25_score, 3)},
+            "total_score":      rerank_score,
+        })
+
+    return out, {
+        "mode":             "hybrid_rrf_rerank",
+        "candidate_count":  len(merged),
     }
 
 

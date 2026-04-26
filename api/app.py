@@ -14,6 +14,7 @@ from search_clinics import (  # noqa: E402
     SearchConfigurationError,
     build_search_response,
     clean_value,
+    get_chroma_collection,
     get_runtime_config,
 )
 
@@ -161,6 +162,15 @@ def require_bearer_token():
 @app.route("/health", methods=["GET"])
 def health():
     model_info = get_runtime_config()
+    chroma_error = None
+    chroma_accessible = False
+
+    try:
+        get_chroma_collection()
+        chroma_accessible = True
+    except Exception as exc:
+        chroma_error = f"{type(exc).__name__}: {exc}"
+
     components = {
         "openai": {
             "configured": env_present("OPENAI_API_KEY"),
@@ -172,12 +182,23 @@ def health():
                 for name in ("CHROMA_API_KEY", "CHROMA_TENANT", "CHROMA_DATABASE")
             ),
             "collection_name": model_info["collection_name"],
+            "host": model_info["chroma_host"],
+            "port": model_info["chroma_port"],
+            "accessible": chroma_accessible,
         },
         "tavily": {
             "configured": env_present("TAVILY_API_KEY"),
         },
     }
-    overall_ok = components["openai"]["configured"] and components["chroma"]["configured"]
+
+    if chroma_error:
+        components["chroma"]["error"] = chroma_error
+
+    overall_ok = (
+        components["openai"]["configured"]
+        and components["chroma"]["configured"]
+        and chroma_accessible
+    )
     return jsonify(
         {
             "status": "ok" if overall_ok else "degraded",

@@ -1,4 +1,5 @@
 import os
+import re
 import csv
 import json
 import hashlib
@@ -10,19 +11,50 @@ from openai import OpenAI
 
 
 CSV_FILE = "./db/dataset_raw.csv"
-COLLECTION_NAME = "clinics_rag"
-EMBED_MODEL = "text-embedding-3-small"
+COLLECTION_NAME = "clinics_rag_v2"
+EMBED_MODEL = "text-embedding-3-large"
 BATCH_SIZE = 100
 GEO_INDEX_FILE = Path("./db/clinic_geo_index.json")
+BM25_INDEX_FILE = Path("./db/bm25_index.json")
 
 
-SEARCHABLE_FIELDS = [
-    "name",
-    "specialties",
-    "procedure",
-    "equipment",
-    "capability",
-]
+# Specialty-bucket flags get baked into Chroma metadata so the search layer
+# can pre-filter (e.g. only orthopedics clinics for a "knee" query). Each list
+# is a set of substring rules that we test (case-insensitive) against the
+# raw camelCase specialty codes for each clinic.
+SPECIALTY_BUCKETS: dict[str, list[str]] = {
+    "orthopedics":      ["orthop", "joint", "knee", "spine", "sports", "fracture", "arthro", "ligament"],
+    "ophthalmology":    ["ophthalm", "retina", "glaucoma", "cataract", "vitreo", "cornea", "refractive", "uveiti"],
+    "dental":           ["dent", "periodont", "endodont", "orthodont", "prosthodont"],
+    "dermatology":      ["dermat", "skin", "cosmet", "aesthetic"],
+    "cardiology":       ["cardi"],
+    "fertility":        ["fertilit", "ivf", "reproductive", "obstetric", "gynec", "gynaec"],
+    "ent":              ["otolaryng", "rhinolog", "laryngolog"],
+    "pediatrics":       ["pediatr", "paediatr", "neonat"],
+    "gastroenterology": ["gastro", "hepato"],
+    "neurology":        ["neuro"],
+    "oncology":         ["oncolog", "cancer", "hematolog", "haematolog"],
+    "urology":          ["urolog", "nephrolog"],
+    "pulmonology":      ["pulmo", "respirator", "thoracic"],
+    "psychiatry":       ["psychiatr", "psycholog"],
+    "endocrinology":    ["endocrin", "diabet"],
+    "general_medicine": ["familymedicine", "internalmedicine", "generalmedicine"],
+}
+
+
+def compute_bucket_flags(specialty_codes: list[str]) -> dict[str, bool]:
+    """Return {bucket_<name>: True} only for buckets the clinic belongs to.
+
+    Missing buckets are deliberately omitted so a Chroma equality filter
+    treats those clinics as non-matching.
+    """
+    flags: dict[str, bool] = {}
+    lowered = [s.lower() for s in specialty_codes]
+    for bucket, keywords in SPECIALTY_BUCKETS.items():
+        if any(any(kw in s for kw in keywords) for s in lowered):
+            flags[f"bucket_{bucket}"] = True
+    return flags
+
 
 METADATA_FIELDS = [
     "name",
@@ -30,7 +62,6 @@ METADATA_FIELDS = [
     "email",
     "address_city",
     "address_stateOrRegion",
-    "address_country",
     "latitude",
     "longitude",
     "facilityTypeId",
@@ -39,6 +70,20 @@ METADATA_FIELDS = [
     "numberDoctors",
     "capacity",
 ]
+
+
+def expand_camel_case(text: str) -> str:
+    """Split camelCase / PascalCase tokens into space-separated lowercase words.
+
+    e.g. "cataractAndAnteriorSegmentSurgery" -> "cataract and anterior segment surgery"
+    """
+    if not text:
+        return text
+    # Insert space between lowercase->uppercase boundaries
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+    # Handle ABCDef -> ABC Def (acronym followed by word)
+    s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", s)
+    return s.lower()
 
 
 def parse_json_list(value: str) -> list[str]:
@@ -68,34 +113,44 @@ def clean_value(value: Any) -> str:
 
 
 def make_chunk_text(row: dict) -> str:
-    specialties = parse_json_list(clean_value(row.get("specialties")))
+    specialties_raw = parse_json_list(clean_value(row.get("specialties")))
+    specialties = [expand_camel_case(s) for s in specialties_raw]
     procedures = parse_json_list(clean_value(row.get("procedure")))
     equipment = parse_json_list(clean_value(row.get("equipment")))
     capabilities = parse_json_list(clean_value(row.get("capability")))
-
-    parts = []
+    description = clean_value(row.get("description"))
 
     name = clean_value(row.get("name"))
-    if name:
-        parts.append(f"Clinic name: {name}")
-
     city = clean_value(row.get("address_city"))
     state = clean_value(row.get("address_stateOrRegion"))
     location = ", ".join(value for value in [city, state] if value)
+
+    # Clinical block - the signal that should dominate the embedding.
+    clinical_parts: list[str] = []
+    if specialties:
+        clinical_parts.append(f"Specialties: {', '.join(specialties)}")
+    if procedures:
+        clinical_parts.append(f"Procedures and surgeries: {', '.join(procedures)}")
+    if equipment:
+        clinical_parts.append(f"Equipment: {', '.join(equipment)}")
+    if capabilities:
+        clinical_parts.append(f"Capabilities and services: {', '.join(capabilities)}")
+
+    parts: list[str] = []
+
+    # Clinical signal first (and repeated below) so it weighs more in the embedding.
+    parts.extend(clinical_parts)
+
+    if description:
+        parts.append(f"Description: {description}")
+
+    if name:
+        parts.append(f"Clinic name: {name}")
     if location:
         parts.append(f"Location: {location}")
 
-    if specialties:
-        parts.append(f"Specialties: {', '.join(specialties)}")
-
-    if procedures:
-        parts.append(f"Procedures and surgeries: {', '.join(procedures)}")
-
-    if equipment:
-        parts.append(f"Equipment: {', '.join(equipment)}")
-
-    if capabilities:
-        parts.append(f"Capabilities: {', '.join(capabilities)}")
+    # Repeat clinical block to up-weight specialty / procedure / capability tokens.
+    parts.extend(clinical_parts)
 
     return "\n".join(parts)
 
@@ -122,19 +177,8 @@ def make_metadata(row: dict) -> dict:
         else:
             metadata[field] = value
 
-    for field in SEARCHABLE_FIELDS:
-        values = parse_json_list(clean_value(row.get(field)))
-        if values:
-            metadata[f"{field}_json"] = json.dumps(values)
-
-    phone_numbers = parse_json_list(clean_value(row.get("phone_numbers")))
-    websites = parse_json_list(clean_value(row.get("websites")))
-
-    if phone_numbers:
-        metadata["phone_numbers_json"] = json.dumps(phone_numbers)
-
-    if websites:
-        metadata["websites_json"] = json.dumps(websites)
+    specialty_codes = parse_json_list(clean_value(row.get("specialties")))
+    metadata.update(compute_bucket_flags(specialty_codes))
 
     return metadata
 
@@ -246,6 +290,10 @@ def index_csv():
     print(f"Loaded {len(chunks)} chunks")
     GEO_INDEX_FILE.write_text(json.dumps(geo_index), encoding="utf-8")
     print(f"Wrote geo index with {len(geo_index)} entries to {GEO_INDEX_FILE}")
+
+    # Dump the same chunk text for BM25 to consume locally at query time.
+    BM25_INDEX_FILE.write_text(json.dumps(chunks), encoding="utf-8")
+    print(f"Wrote BM25 corpus with {len(chunks)} entries to {BM25_INDEX_FILE}")
 
     for i in range(0, len(chunks), BATCH_SIZE):
         batch = chunks[i:i + BATCH_SIZE]

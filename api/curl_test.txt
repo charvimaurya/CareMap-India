@@ -1,0 +1,17 @@
+# Health check
+curl http://localhost:5001/health
+
+# Search — single clinic ID
+curl -X POST http://localhost:5001/search \
+  -H "Content-Type: application/json" \
+  -d '{"clinic_ids": ["clinic_00001"]}'
+
+# Search — multiple clinic IDs
+time curl -X POST http://localhost:5001/search \
+  -H "Content-Type: application/json" \
+  -d '{"clinic_ids": ["clinic_00001", "clinic_00002", "clinic_00003"]}'
+
+# Pretty-print response with jq
+curl -s -X POST http://localhost:5001/search \
+  -H "Content-Type: application/json" \
+  -d '{"clinic_ids": ["clinic_00001"]}' | jq .

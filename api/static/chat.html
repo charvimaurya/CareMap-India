@@ -1,0 +1,1188 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Clinic Search Chat</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    >
+    <style>
+      :root {
+        --bg: #f5efe6;
+        --panel: rgba(255, 252, 247, 0.92);
+        --panel-strong: #fffdf9;
+        --ink: #17212b;
+        --muted: #617080;
+        --line: rgba(23, 33, 43, 0.12);
+        --accent: #0e7c66;
+        --accent-2: #f08a24;
+        --shadow: 0 18px 40px rgba(20, 28, 36, 0.08);
+        --radius: 22px;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "Avenir Next", "Segoe UI", sans-serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, rgba(240, 138, 36, 0.22), transparent 28%),
+          radial-gradient(circle at top right, rgba(14, 124, 102, 0.18), transparent 24%),
+          linear-gradient(180deg, #fff9f1 0%, var(--bg) 45%, #efe5d9 100%);
+      }
+
+      .shell {
+        width: min(1180px, calc(100vw - 32px));
+        margin: 24px auto;
+        display: grid;
+        grid-template-columns: 320px 1fr;
+        gap: 20px;
+      }
+
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(18px);
+      }
+
+      .sidebar {
+        padding: 24px;
+        position: sticky;
+        top: 24px;
+        align-self: start;
+      }
+
+      .brand {
+        margin-bottom: 24px;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 12px;
+        border-radius: 999px;
+        font-size: 12px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        background: rgba(14, 124, 102, 0.1);
+        color: var(--accent);
+      }
+
+      h1 {
+        margin: 14px 0 8px;
+        font-size: 30px;
+        line-height: 1.02;
+      }
+
+      .brand p,
+      .meta-list,
+      .status-note {
+        color: var(--muted);
+        line-height: 1.55;
+      }
+
+      .meta-list {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        display: grid;
+        gap: 10px;
+      }
+
+      .meta-list strong {
+        color: var(--ink);
+      }
+
+      .sidebar-section {
+        margin-top: 24px;
+        padding-top: 20px;
+        border-top: 1px solid var(--line);
+      }
+
+      .status-dot {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #a2adb8;
+        margin-right: 8px;
+      }
+
+      .status-dot.ok {
+        background: var(--accent);
+      }
+
+      .status-dot.bad {
+        background: #d94d45;
+      }
+
+      .chat {
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        min-height: calc(100vh - 48px);
+        overflow: hidden;
+      }
+
+      .chat-head {
+        padding: 24px 28px 12px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .chat-head h2 {
+        margin: 0;
+        font-size: 28px;
+      }
+
+      .chat-head p {
+        margin: 8px 0 0;
+        color: var(--muted);
+      }
+
+      .transcript {
+        padding: 22px;
+        overflow-y: auto;
+        display: grid;
+        gap: 16px;
+      }
+
+      .message {
+        max-width: 90%;
+        padding: 16px 18px;
+        border-radius: 20px;
+        border: 1px solid var(--line);
+        background: var(--panel-strong);
+      }
+
+      .message.user {
+        margin-left: auto;
+        border-bottom-right-radius: 8px;
+        background: linear-gradient(135deg, rgba(14, 124, 102, 0.14), rgba(14, 124, 102, 0.06));
+      }
+
+      .message.assistant {
+        border-bottom-left-radius: 8px;
+      }
+
+      .message.error {
+        border-color: rgba(217, 77, 69, 0.28);
+        background: rgba(217, 77, 69, 0.07);
+      }
+
+      .message-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 10px;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: var(--muted);
+      }
+
+      .summary {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 10px;
+      }
+
+      .pill {
+        padding: 6px 10px;
+        border-radius: 999px;
+        background: rgba(23, 33, 43, 0.06);
+        color: var(--ink);
+        font-size: 12px;
+      }
+
+      .results {
+        display: grid;
+        gap: 12px;
+        margin-top: 14px;
+      }
+
+      .result-card {
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 16px;
+        background: #fffdfa;
+        cursor: pointer;
+        transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+      }
+
+      .result-card:hover {
+        transform: translateY(-1px);
+        border-color: rgba(240, 138, 36, 0.35);
+        box-shadow: 0 12px 24px rgba(20, 28, 36, 0.06);
+      }
+
+      .result-card.active {
+        border-color: rgba(240, 138, 36, 0.55);
+        box-shadow: 0 16px 28px rgba(240, 138, 36, 0.14);
+      }
+
+      .result-top {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: flex-start;
+      }
+
+      .result-title {
+        margin: 0;
+        font-size: 18px;
+      }
+
+      .result-subtitle {
+        margin: 6px 0 0;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .rank-badge {
+        min-width: 56px;
+        text-align: center;
+        padding: 8px 10px;
+        border-radius: 14px;
+        background: rgba(240, 138, 36, 0.12);
+        color: #9a5a13;
+        font-weight: 700;
+      }
+
+      .result-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px 16px;
+        margin-top: 14px;
+      }
+
+      .result-row small {
+        display: block;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        font-size: 11px;
+        margin-bottom: 4px;
+      }
+
+      .tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 14px;
+      }
+
+      .tag {
+        padding: 6px 10px;
+        border-radius: 999px;
+        background: rgba(14, 124, 102, 0.08);
+        color: var(--accent);
+        font-size: 12px;
+      }
+
+      .document {
+        margin-top: 14px;
+        padding-top: 14px;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        line-height: 1.6;
+        white-space: pre-wrap;
+      }
+
+      .composer {
+        border-top: 1px solid var(--line);
+        padding: 20px 22px 22px;
+        background: rgba(255, 253, 249, 0.86);
+      }
+
+      .controls {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+
+      .field {
+        display: grid;
+        gap: 6px;
+      }
+
+      .field.wide {
+        grid-column: 1 / -1;
+      }
+
+      label {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--muted);
+      }
+
+      input,
+      textarea {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: #fff;
+        color: var(--ink);
+        padding: 13px 14px;
+        font: inherit;
+      }
+
+      textarea {
+        min-height: 110px;
+        resize: vertical;
+      }
+
+      .map-shell {
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        overflow: hidden;
+        background: rgba(255, 255, 255, 0.72);
+      }
+
+      .map-toolbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--line);
+        background: rgba(255, 253, 249, 0.92);
+      }
+
+      .map-toolbar p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.5;
+      }
+
+      .map-button {
+        border: 1px solid rgba(23, 33, 43, 0.14);
+        border-radius: 999px;
+        padding: 10px 14px;
+        background: #fff;
+        color: var(--ink);
+        box-shadow: none;
+        font-size: 13px;
+      }
+
+      .map-button:hover {
+        border-color: rgba(14, 124, 102, 0.4);
+      }
+
+      #map {
+        height: 320px;
+        width: 100%;
+      }
+
+      .coords-note {
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .map-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 10px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .legend-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .legend-swatch {
+        width: 12px;
+        height: 12px;
+        border-radius: 999px;
+      }
+
+      .legend-swatch.user {
+        background: #0e7c66;
+      }
+
+      .legend-swatch.result {
+        background: #f08a24;
+      }
+
+      .toggle-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .toggle-row input {
+        width: 18px;
+        height: 18px;
+        margin: 0;
+      }
+
+      .composer-actions {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 16px;
+      }
+
+      .hint {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      button {
+        border: 0;
+        border-radius: 999px;
+        padding: 14px 22px;
+        font: inherit;
+        font-weight: 700;
+        color: #fff;
+        cursor: pointer;
+        background: linear-gradient(135deg, var(--accent), #116b8f);
+        box-shadow: 0 10px 24px rgba(14, 124, 102, 0.24);
+      }
+
+      button:disabled {
+        cursor: wait;
+        opacity: 0.7;
+      }
+
+      .empty-state {
+        border: 1px dashed rgba(23, 33, 43, 0.18);
+        border-radius: 20px;
+        padding: 24px;
+        color: var(--muted);
+        line-height: 1.65;
+        background: rgba(255, 255, 255, 0.4);
+      }
+
+      .marker-pin {
+        width: 18px;
+        height: 18px;
+        border-radius: 999px;
+        border: 3px solid #fff;
+        box-shadow: 0 6px 18px rgba(23, 33, 43, 0.22);
+      }
+
+      .marker-pin.user {
+        background: #0e7c66;
+      }
+
+      .marker-pin.result {
+        background: #f08a24;
+      }
+
+      .marker-pin.result.active {
+        background: #d94d45;
+        transform: scale(1.2);
+      }
+
+      @media (max-width: 960px) {
+        .shell {
+          grid-template-columns: 1fr;
+        }
+
+        .sidebar {
+          position: static;
+        }
+
+        .chat {
+          min-height: auto;
+        }
+      }
+
+      @media (max-width: 720px) {
+        .shell {
+          width: min(100vw - 16px, 100%);
+          margin: 8px auto 16px;
+        }
+
+        .controls,
+        .result-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .composer-actions {
+          flex-direction: column;
+          align-items: stretch;
+        }
+
+        .message {
+          max-width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <aside class="panel sidebar">
+        <div class="brand">
+          <div class="eyebrow">OpenAI + Chroma</div>
+          <h1>Clinic Search Chat</h1>
+          <p>Ask in natural language, optionally add location, and inspect ranked clinics without leaving the browser.</p>
+        </div>
+
+        <ul class="meta-list">
+          <li><strong>Endpoint</strong><br><span id="api-endpoint">/rag-search</span></li>
+          <li><strong>Embedding model</strong><br><span id="model-name">Checking...</span></li>
+          <li><strong>Collection</strong><br><span id="collection-name">Checking...</span></li>
+        </ul>
+
+        <div class="sidebar-section">
+          <div class="status-note">
+            <span id="health-dot" class="status-dot"></span>
+            <span id="health-text">Checking API health...</span>
+          </div>
+          <p class="status-note" id="health-detail"></p>
+        </div>
+
+        <div class="sidebar-section">
+          <p class="status-note">
+            Enter the bearer token before searching. When user coordinates are set, the backend geo-prefilters clinics to a 100 km radius first, then ranks only that nearby set. Default result count is 20. Website and opening-hours enrichment requires `TAVILY_API_KEY`.
+          </p>
+        </div>
+      </aside>
+
+      <section class="panel chat">
+        <header class="chat-head">
+          <h2>Search conversation</h2>
+          <p>Use a free-form prompt like “eye hospital for retina and cataract near Noida” and adjust the optional filters below only when needed.</p>
+        </header>
+
+        <div id="transcript" class="transcript">
+          <div class="empty-state">
+            Start with a natural language search. Results will appear as ranked clinic cards with field scores, location, and optional enrichment.
+          </div>
+        </div>
+
+        <form id="chat-form" class="composer">
+          <div class="controls">
+            <div class="field wide">
+              <label for="query">Prompt</label>
+              <textarea id="query" name="query" placeholder="Find a clinic for cataract surgery and retina treatment near Delhi" required></textarea>
+            </div>
+
+            <div class="field wide">
+              <label for="auth-token">Bearer token</label>
+              <input id="auth-token" name="auth_token" type="password" placeholder="Enter API bearer token">
+            </div>
+
+            <div class="field wide">
+              <label for="map">Pick location on map</label>
+              <div class="map-shell">
+                <div class="map-toolbar">
+                  <p>Click anywhere on the map to set the user's latitude and longitude for distance sorting.</p>
+                  <button class="map-button" id="clear-map" type="button">Clear pin</button>
+                </div>
+                <div id="map" aria-label="Map for selecting user coordinates"></div>
+              </div>
+              <div class="coords-note" id="coords-note">No map point selected yet.</div>
+              <div class="map-legend">
+                <span class="legend-item"><span class="legend-swatch user"></span>User location</span>
+                <span class="legend-item"><span class="legend-swatch result"></span>Clinic results</span>
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="city">City filter</label>
+              <input id="city" name="city" type="text" placeholder="Noida">
+            </div>
+
+            <div class="field">
+              <label for="state">State filter</label>
+              <input id="state" name="state" type="text" placeholder="Uttar Pradesh">
+            </div>
+
+            <div class="field">
+              <label for="facility-type">Facility type</label>
+              <input id="facility-type" name="facility_type" type="text" placeholder="hospital">
+            </div>
+
+            <div class="field">
+              <label for="country">Country</label>
+              <input id="country" name="country" type="text" placeholder="India">
+            </div>
+
+            <div class="field">
+              <label for="user-lat">User latitude</label>
+              <input id="user-lat" name="user_lat" type="number" step="any" placeholder="28.6139">
+            </div>
+
+            <div class="field">
+              <label for="user-lon">User longitude</label>
+              <input id="user-lon" name="user_lon" type="number" step="any" placeholder="77.2090">
+            </div>
+
+            <div class="field">
+              <label for="n-results">Number of results</label>
+              <input id="n-results" name="n_results" type="number" min="1" max="50" value="20">
+            </div>
+
+            <div class="field">
+              <label for="enrich-top-k">Enrich top K</label>
+              <input id="enrich-top-k" name="enrich_top_k" type="number" min="0" max="5" value="3">
+            </div>
+
+            <div class="field wide toggle-row">
+              <input id="enrich" name="enrich" type="checkbox">
+              <label for="enrich" style="margin:0; font-size:14px; letter-spacing:0; text-transform:none;">Use Tavily enrichment for website and opening hours</label>
+            </div>
+          </div>
+
+          <div class="composer-actions">
+            <div class="hint" id="request-status">Ready.</div>
+            <button id="send-button" type="submit">Search</button>
+          </div>
+        </form>
+      </section>
+    </main>
+
+    <template id="user-message-template">
+      <article class="message user">
+        <div class="message-header">
+          <span>You</span>
+          <span class="timestamp"></span>
+        </div>
+        <div class="message-body"></div>
+      </article>
+    </template>
+
+    <template id="assistant-message-template">
+      <article class="message assistant">
+        <div class="message-header">
+          <span>Clinic Search</span>
+          <span class="timestamp"></span>
+        </div>
+        <div class="message-body"></div>
+      </article>
+    </template>
+
+    <template id="error-message-template">
+      <article class="message assistant error">
+        <div class="message-header">
+          <span>Error</span>
+          <span class="timestamp"></span>
+        </div>
+        <div class="message-body"></div>
+      </article>
+    </template>
+
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <script>
+      const transcript = document.getElementById("transcript");
+      const form = document.getElementById("chat-form");
+      const requestStatus = document.getElementById("request-status");
+      const sendButton = document.getElementById("send-button");
+      const clearMapButton = document.getElementById("clear-map");
+      const coordsNote = document.getElementById("coords-note");
+      const healthDot = document.getElementById("health-dot");
+      const healthText = document.getElementById("health-text");
+      const healthDetail = document.getElementById("health-detail");
+      const modelName = document.getElementById("model-name");
+      const collectionName = document.getElementById("collection-name");
+      const authTokenInput = document.getElementById("auth-token");
+      const userLatInput = document.getElementById("user-lat");
+      const userLonInput = document.getElementById("user-lon");
+      let map;
+      let userMarker;
+      let resultLayer;
+      let activeResultMarker = null;
+      const resultMarkers = new Map();
+
+      function nowStamp() {
+        return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      }
+
+      function getBearerToken() {
+        return authTokenInput.value.trim();
+      }
+
+      function persistBearerToken() {
+        localStorage.setItem("caremap_api_bearer_token", getBearerToken());
+      }
+
+      function clearEmptyState() {
+        const emptyState = transcript.querySelector(".empty-state");
+        if (emptyState) {
+          emptyState.remove();
+        }
+      }
+
+      function createMessage(templateId, html) {
+        clearEmptyState();
+        const template = document.getElementById(templateId);
+        const fragment = template.content.cloneNode(true);
+        fragment.querySelector(".timestamp").textContent = nowStamp();
+        fragment.querySelector(".message-body").innerHTML = html;
+        transcript.appendChild(fragment);
+        transcript.scrollTop = transcript.scrollHeight;
+      }
+
+      function updateCoordsNote(lat, lon) {
+        if (typeof lat === "number" && typeof lon === "number") {
+          coordsNote.textContent = `Selected coordinates: ${lat.toFixed(6)}, ${lon.toFixed(6)}`;
+          return;
+        }
+        coordsNote.textContent = "No map point selected yet.";
+      }
+
+      function createMarkerIcon(kind, active = false) {
+        const classes = ["marker-pin", kind];
+        if (active) {
+          classes.push("active");
+        }
+        return L.divIcon({
+          html: `<div class="${classes.join(" ")}"></div>`,
+          className: "",
+          iconSize: [18, 18],
+          iconAnchor: [9, 9],
+          popupAnchor: [0, -8],
+        });
+      }
+
+      function clearMapSelection() {
+        userLatInput.value = "";
+        userLonInput.value = "";
+        if (userMarker) {
+          map.removeLayer(userMarker);
+          userMarker = null;
+        }
+        updateCoordsNote();
+      }
+
+      function setSelectedCoordinates(lat, lon, recenter = true) {
+        userLatInput.value = lat.toFixed(6);
+        userLonInput.value = lon.toFixed(6);
+        updateCoordsNote(lat, lon);
+
+        if (!userMarker) {
+          userMarker = L.marker([lat, lon], {
+            icon: createMarkerIcon("user"),
+          }).addTo(map);
+        } else {
+          userMarker.setLatLng([lat, lon]);
+        }
+
+        userMarker.bindPopup(`Selected location<br>${lat.toFixed(6)}, ${lon.toFixed(6)}`);
+        if (recenter) {
+          map.setView([lat, lon], Math.max(map.getZoom(), 12));
+        }
+      }
+
+      function syncMarkerFromInputs() {
+        const lat = Number(userLatInput.value);
+        const lon = Number(userLonInput.value);
+        if (Number.isFinite(lat) && Number.isFinite(lon)) {
+          setSelectedCoordinates(lat, lon, false);
+        } else if (!userLatInput.value && !userLonInput.value) {
+          clearMapSelection();
+        }
+      }
+
+      function initMap() {
+        map = L.map("map").setView([22.9734, 78.6569], 5);
+        resultLayer = L.layerGroup().addTo(map);
+
+        L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+          maxZoom: 19,
+          attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+        }).addTo(map);
+
+        map.on("click", (event) => {
+          const { lat, lng } = event.latlng;
+          setSelectedCoordinates(lat, lng);
+        });
+
+        clearMapButton.addEventListener("click", clearMapSelection);
+        userLatInput.addEventListener("change", syncMarkerFromInputs);
+        userLonInput.addEventListener("change", syncMarkerFromInputs);
+        userLatInput.addEventListener("blur", syncMarkerFromInputs);
+        userLonInput.addEventListener("blur", syncMarkerFromInputs);
+
+        setTimeout(() => {
+          map.invalidateSize();
+        }, 0);
+      }
+
+      function clearResultMarkers() {
+        if (resultLayer) {
+          resultLayer.clearLayers();
+        }
+        resultMarkers.clear();
+        activeResultMarker = null;
+      }
+
+      function setActiveResultMarker(resultId) {
+        if (activeResultMarker && resultMarkers.has(activeResultMarker)) {
+          resultMarkers.get(activeResultMarker).setIcon(createMarkerIcon("result"));
+        }
+        if (resultMarkers.has(resultId)) {
+          resultMarkers.get(resultId).setIcon(createMarkerIcon("result", true));
+          activeResultMarker = resultId;
+        } else {
+          activeResultMarker = null;
+        }
+      }
+
+      function attachResultCardHandlers() {
+        transcript.querySelectorAll(".result-card[data-result-id]").forEach((card) => {
+          card.addEventListener("click", () => {
+            const resultId = card.dataset.resultId;
+            const marker = resultMarkers.get(resultId);
+
+            transcript.querySelectorAll(".result-card.active").forEach((node) => {
+              node.classList.remove("active");
+            });
+            card.classList.add("active");
+            setActiveResultMarker(resultId);
+
+            if (marker) {
+              map.setView(marker.getLatLng(), Math.max(map.getZoom(), 13), {
+                animate: true,
+              });
+              marker.openPopup();
+            }
+          });
+        });
+      }
+
+      function renderResultMarkers(results) {
+        clearResultMarkers();
+
+        const bounds = [];
+        if (userMarker) {
+          bounds.push(userMarker.getLatLng());
+        }
+
+        results.forEach((result) => {
+          const metadata = result.metadata || {};
+          const lat = Number(metadata.latitude);
+          const lon = Number(metadata.longitude);
+          if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+            return;
+          }
+
+          const location = [
+            metadata.address_city,
+            metadata.address_stateOrRegion,
+            metadata.address_country,
+          ].filter(Boolean).join(", ");
+
+          const marker = L.marker([lat, lon], {
+            icon: createMarkerIcon("result"),
+          });
+
+          marker.bindPopup(`
+            <strong>#${escapeHtml(result.rank)} ${escapeHtml(metadata.name || "Clinic")}</strong><br>
+            ${escapeHtml(location || "Location unavailable")}<br>
+            ${result.distance_km != null ? `${escapeHtml(result.distance_km)} km from user<br>` : ""}
+            Score: ${escapeHtml(result.total_score)}
+          `);
+
+          marker.on("click", () => {
+            transcript.querySelectorAll(".result-card.active").forEach((node) => {
+              node.classList.remove("active");
+            });
+            const selectorId = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(result.id) : result.id.replace(/"/g, '\\"');
+            const card = transcript.querySelector(`.result-card[data-result-id="${selectorId}"]`);
+            if (card) {
+              card.classList.add("active");
+              card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+            }
+            setActiveResultMarker(result.id);
+          });
+
+          marker.addTo(resultLayer);
+          resultMarkers.set(result.id, marker);
+          bounds.push(marker.getLatLng());
+        });
+
+        if (bounds.length > 1) {
+          map.fitBounds(bounds, { padding: [36, 36] });
+        } else if (bounds.length === 1) {
+          map.setView(bounds[0], Math.max(map.getZoom(), 12));
+        }
+      }
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      function collectTags(result) {
+        const metadata = result.metadata || {};
+        const groups = [
+          metadata.specialties_json,
+          metadata.procedure_json,
+          metadata.equipment_json,
+          metadata.capability_json,
+        ];
+
+        const tags = [];
+        for (const group of groups) {
+          if (!group) continue;
+          try {
+            const parsed = JSON.parse(group);
+            if (Array.isArray(parsed)) {
+              parsed.slice(0, 8 - tags.length).forEach((item) => {
+                if (item && tags.length < 8) tags.push(item);
+              });
+            }
+          } catch (_error) {
+            continue;
+          }
+        }
+        return tags;
+      }
+
+      function renderSummary(response) {
+        const filters = response.filters || {};
+        const pills = [
+          `${response.count} results`,
+          `model: ${response.model_info?.embedding_model || "unknown"}`,
+        ];
+
+        if (filters.user_lat != null && filters.user_lon != null) {
+          pills.push("distance sort enabled");
+        }
+        if (filters.city) pills.push(`city: ${filters.city}`);
+        if (filters.state) pills.push(`state: ${filters.state}`);
+        if (filters.facility_type) pills.push(`facility: ${filters.facility_type}`);
+        if (filters.enrich) pills.push(`enrich top ${filters.enrich_top_k}`);
+
+        return `
+          <div>${escapeHtml(response.query)}</div>
+          <div class="summary">
+            ${pills.map((pill) => `<span class="pill">${escapeHtml(pill)}</span>`).join("")}
+          </div>
+        `;
+      }
+
+      function renderResults(response) {
+        if (!response.results || response.results.length === 0) {
+          return `
+            ${renderSummary(response)}
+            <div class="results">
+              <div class="result-card">No clinics matched this search.</div>
+            </div>
+          `;
+        }
+
+        const resultCards = response.results.map((result) => {
+          const metadata = result.metadata || {};
+          const location = [metadata.address_city, metadata.address_stateOrRegion, metadata.address_country]
+            .filter(Boolean)
+            .join(", ");
+          const tags = collectTags(result);
+          const enrichment = result.enrichment || {};
+
+          return `
+            <section class="result-card" data-result-id="${escapeHtml(result.id)}">
+              <div class="result-top">
+                <div>
+                  <h3 class="result-title">${escapeHtml(metadata.name || "Unnamed clinic")}</h3>
+                  <p class="result-subtitle">${escapeHtml(location || "Location unavailable")}</p>
+                </div>
+                <div class="rank-badge">#${escapeHtml(result.rank)}</div>
+              </div>
+
+              <div class="result-grid">
+                <div class="result-row">
+                  <small>Total score</small>
+                  <div>${escapeHtml(result.total_score)}</div>
+                </div>
+                <div class="result-row">
+                  <small>Vector distance</small>
+                  <div>${escapeHtml(result.vector_distance)}</div>
+                </div>
+                <div class="result-row">
+                  <small>Field score</small>
+                  <div>${escapeHtml(result.field_score)}</div>
+                </div>
+                <div class="result-row">
+                  <small>Distance from user</small>
+                  <div>${result.distance_km != null ? `${escapeHtml(result.distance_km)} km` : "N/A"}</div>
+                </div>
+                <div class="result-row">
+                  <small>Phone</small>
+                  <div>${escapeHtml(metadata.officialPhone || "N/A")}</div>
+                </div>
+                <div class="result-row">
+                  <small>Email</small>
+                  <div>${escapeHtml(metadata.email || "N/A")}</div>
+                </div>
+                <div class="result-row">
+                  <small>Website</small>
+                  <div>${enrichment.website ? `<a href="${escapeHtml(enrichment.website)}" target="_blank" rel="noreferrer">${escapeHtml(enrichment.website)}</a>` : "N/A"}</div>
+                </div>
+                <div class="result-row">
+                  <small>Opening hours</small>
+                  <div>${escapeHtml(enrichment.opening_hours || "N/A")}</div>
+                </div>
+              </div>
+
+              <div class="tags">
+                ${tags.length ? tags.map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("") : `<span class="tag">No structured tags</span>`}
+              </div>
+
+              <div class="document">${escapeHtml(result.document || "")}</div>
+            </section>
+          `;
+        }).join("");
+
+        return `
+          ${renderSummary(response)}
+          <div class="results">${resultCards}</div>
+        `;
+      }
+
+      function currentPromptSummary(payload) {
+        const parts = [payload.query];
+        if (payload.city) parts.push(`city=${payload.city}`);
+        if (payload.state) parts.push(`state=${payload.state}`);
+        if (payload.user_lat != null && payload.user_lon != null) {
+          parts.push(`near ${payload.user_lat}, ${payload.user_lon}`);
+        }
+        return parts.join(" | ");
+      }
+
+      async function fetchHealth() {
+        try {
+          const bearerToken = getBearerToken();
+          if (!bearerToken) {
+            healthDot.classList.remove("ok");
+            healthDot.classList.add("bad");
+            healthText.textContent = "Bearer token required";
+            healthDetail.textContent = "Enter the API bearer token to query /health and /rag-search.";
+            return;
+          }
+
+          const response = await fetch("/health", {
+            headers: {
+              Authorization: `Bearer ${bearerToken}`,
+            },
+          });
+          const data = await response.json();
+          modelName.textContent = data.model_info?.embedding_model || "unknown";
+          collectionName.textContent = data.model_info?.collection_name || "unknown";
+
+          const ok = response.ok && data.status === "ok";
+          healthDot.classList.toggle("ok", ok);
+          healthDot.classList.toggle("bad", !ok);
+          healthText.textContent = ok ? "API healthy" : "API degraded";
+          healthDetail.textContent = `OpenAI: ${data.components?.openai?.configured ? "configured" : "missing"} | Chroma: ${data.components?.chroma?.configured ? "configured" : "missing"} | Tavily: ${data.components?.tavily?.configured ? "configured" : "not set"}`;
+        } catch (_error) {
+          healthDot.classList.add("bad");
+          healthText.textContent = "Health check failed";
+          healthDetail.textContent = "Could not reach /health. Start the Flask server and refresh.";
+        }
+      }
+
+      function buildPayload(formData) {
+        const payload = {
+          query: formData.get("query")?.trim(),
+          city: formData.get("city")?.trim() || null,
+          state: formData.get("state")?.trim() || null,
+          country: formData.get("country")?.trim() || null,
+          facility_type: formData.get("facility_type")?.trim() || null,
+          enrich: document.getElementById("enrich").checked,
+          n_results: Number(formData.get("n_results") || 20),
+          enrich_top_k: Number(formData.get("enrich_top_k") || 3),
+        };
+
+        const userLat = formData.get("user_lat");
+        const userLon = formData.get("user_lon");
+        if (userLat !== "") payload.user_lat = Number(userLat);
+        if (userLon !== "") payload.user_lon = Number(userLon);
+        return payload;
+      }
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+
+        const formData = new FormData(form);
+        const payload = buildPayload(formData);
+        createMessage("user-message-template", `<div>${escapeHtml(currentPromptSummary(payload))}</div>`);
+
+        sendButton.disabled = true;
+        requestStatus.textContent = "Searching clinics...";
+
+        try {
+          const bearerToken = getBearerToken();
+          if (!bearerToken) {
+            throw new Error("Bearer token is required.");
+          }
+
+          const response = await fetch("/rag-search", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${bearerToken}`,
+            },
+            body: JSON.stringify(payload),
+          });
+          const data = await response.json();
+
+          if (!response.ok) {
+            const details = data.details ? `<pre>${escapeHtml(JSON.stringify(data.details, null, 2))}</pre>` : "";
+            createMessage(
+              "error-message-template",
+              `<div>${escapeHtml(data.error || "Request failed.")}</div>${details}`
+            );
+            requestStatus.textContent = "Request failed.";
+            return;
+          }
+
+          createMessage("assistant-message-template", renderResults(data));
+          renderResultMarkers(data.results || []);
+          attachResultCardHandlers();
+          requestStatus.textContent = "Search complete.";
+        } catch (error) {
+          createMessage(
+            "error-message-template",
+            `<div>${escapeHtml(error.message || "Network error.")}</div>`
+          );
+          requestStatus.textContent = "Network error.";
+        } finally {
+          sendButton.disabled = false;
+        }
+      });
+
+      authTokenInput.value = localStorage.getItem("caremap_api_bearer_token") || "";
+      authTokenInput.addEventListener("change", () => {
+        persistBearerToken();
+        fetchHealth();
+      });
+      authTokenInput.addEventListener("blur", persistBearerToken);
+      fetchHealth();
+      initMap();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env
+.env.*
+.venv
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+node_modules/
+dist/
+build/
+*.log
+db/clinic_geo_index.json

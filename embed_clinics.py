@@ -1,0 +1,296 @@
+import os
+import csv
+import json
+import hashlib
+from pathlib import Path
+from typing import Any
+
+import chromadb
+from openai import OpenAI
+
+
+CSV_FILE = "./db/dataset_raw.csv"
+COLLECTION_NAME = "clinics_rag"
+EMBED_MODEL = "text-embedding-3-small"
+BATCH_SIZE = 100
+GEO_INDEX_FILE = Path("./db/clinic_geo_index.json")
+
+
+SEARCHABLE_FIELDS = [
+    "name",
+    "specialties",
+    "procedure",
+    "equipment",
+    "capability",
+]
+
+METADATA_FIELDS = [
+    "name",
+    "officialPhone",
+    "email",
+    "address_city",
+    "address_stateOrRegion",
+    "address_country",
+    "latitude",
+    "longitude",
+    "facilityTypeId",
+    "operatorTypeId",
+    "yearEstablished",
+    "numberDoctors",
+    "capacity",
+]
+
+
+def parse_json_list(value: str) -> list[str]:
+    if not value or value == "null":
+        return []
+
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, list):
+            return [str(x) for x in parsed if x is not None]
+    except Exception:
+        pass
+
+    return [value]
+
+
+def clean_value(value: Any) -> str:
+    if value is None:
+        return ""
+
+    value = str(value).strip()
+
+    if value.lower() in {"null", "none", "nan", ""}:
+        return ""
+
+    return value
+
+
+def make_chunk_text(row: dict) -> str:
+    specialties = parse_json_list(clean_value(row.get("specialties")))
+    procedures = parse_json_list(clean_value(row.get("procedure")))
+    equipment = parse_json_list(clean_value(row.get("equipment")))
+    capabilities = parse_json_list(clean_value(row.get("capability")))
+
+    parts = []
+
+    name = clean_value(row.get("name"))
+    if name:
+        parts.append(f"Clinic name: {name}")
+
+    city = clean_value(row.get("address_city"))
+    state = clean_value(row.get("address_stateOrRegion"))
+    location = ", ".join(value for value in [city, state] if value)
+    if location:
+        parts.append(f"Location: {location}")
+
+    if specialties:
+        parts.append(f"Specialties: {', '.join(specialties)}")
+
+    if procedures:
+        parts.append(f"Procedures and surgeries: {', '.join(procedures)}")
+
+    if equipment:
+        parts.append(f"Equipment: {', '.join(equipment)}")
+
+    if capabilities:
+        parts.append(f"Capabilities: {', '.join(capabilities)}")
+
+    return "\n".join(parts)
+
+
+def make_metadata(row: dict) -> dict:
+    metadata = {}
+
+    for field in METADATA_FIELDS:
+        value = clean_value(row.get(field))
+
+        if value == "":
+            continue
+
+        if field in {"latitude", "longitude"}:
+            try:
+                metadata[field] = float(value)
+            except ValueError:
+                continue
+        elif field in {"yearEstablished", "numberDoctors", "capacity"}:
+            try:
+                metadata[field] = int(float(value))
+            except ValueError:
+                continue
+        else:
+            metadata[field] = value
+
+    for field in SEARCHABLE_FIELDS:
+        values = parse_json_list(clean_value(row.get(field)))
+        if values:
+            metadata[f"{field}_json"] = json.dumps(values)
+
+    phone_numbers = parse_json_list(clean_value(row.get("phone_numbers")))
+    websites = parse_json_list(clean_value(row.get("websites")))
+
+    if phone_numbers:
+        metadata["phone_numbers_json"] = json.dumps(phone_numbers)
+
+    if websites:
+        metadata["websites_json"] = json.dumps(websites)
+
+    return metadata
+
+
+def make_id(row: dict) -> str:
+    base = "|".join([
+        clean_value(row.get("name")),
+        clean_value(row.get("address_city")),
+        clean_value(row.get("officialPhone")),
+    ])
+
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()
+
+
+def make_geo_entry(row: dict) -> dict | None:
+    latitude = clean_value(row.get("latitude"))
+    longitude = clean_value(row.get("longitude"))
+    if not latitude or not longitude:
+        return None
+
+    try:
+        latitude_value = float(latitude)
+        longitude_value = float(longitude)
+    except ValueError:
+        return None
+
+    return {
+        "id": make_id(row),
+        "name": clean_value(row.get("name")),
+        "latitude": latitude_value,
+        "longitude": longitude_value,
+        "address_city": clean_value(row.get("address_city")),
+        "address_stateOrRegion": clean_value(row.get("address_stateOrRegion")),
+        "address_country": clean_value(row.get("address_country")),
+        "facilityTypeId": clean_value(row.get("facilityTypeId")),
+    }
+
+
+def chunks_from_csv(csv_file: str) -> list[dict]:
+    chunks = []
+
+    with open(csv_file, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+
+        for row in reader:
+            text = make_chunk_text(row)
+
+            if not text.strip():
+                continue
+
+            chunks.append({
+                "id": make_id(row),
+                "text": text,
+                "metadata": make_metadata(row),
+            })
+
+    return chunks
+
+
+def build_geo_index(csv_file: str) -> list[dict]:
+    geo_index = []
+
+    with open(csv_file, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+
+        for row in reader:
+            entry = make_geo_entry(row)
+            if entry:
+                geo_index.append(entry)
+
+    return geo_index
+
+
+def get_openai_client() -> OpenAI:
+    return OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+
+def get_chroma_collection():
+    chroma_client = chromadb.CloudClient(
+        cloud_port=443,
+        cloud_host="europe-west1.gcp.trychroma.com",
+        api_key=os.environ["CHROMA_API_KEY"],
+        tenant=os.environ["CHROMA_TENANT"],
+        database=os.environ["CHROMA_DATABASE"],
+    )
+
+    return chroma_client.get_or_create_collection(
+        name=COLLECTION_NAME,
+        metadata={"hnsw:space": "cosine"},
+    )
+
+
+def embed_texts(openai_client: OpenAI, texts: list[str]) -> list[list[float]]:
+    res = openai_client.embeddings.create(
+        model=EMBED_MODEL,
+        input=texts,
+    )
+
+    return [item.embedding for item in res.data]
+
+
+def index_csv():
+    openai_client = get_openai_client()
+    collection = get_chroma_collection()
+
+    chunks = chunks_from_csv(CSV_FILE)
+    geo_index = build_geo_index(CSV_FILE)
+
+    print(f"Loaded {len(chunks)} chunks")
+    GEO_INDEX_FILE.write_text(json.dumps(geo_index), encoding="utf-8")
+    print(f"Wrote geo index with {len(geo_index)} entries to {GEO_INDEX_FILE}")
+
+    for i in range(0, len(chunks), BATCH_SIZE):
+        batch = chunks[i:i + BATCH_SIZE]
+
+        texts = [x["text"] for x in batch]
+        ids = [x["id"] for x in batch]
+        metadatas = [x["metadata"] for x in batch]
+
+        embeddings = embed_texts(openai_client, texts)
+
+        collection.upsert(
+            ids=ids,
+            documents=texts,
+            embeddings=embeddings,
+            metadatas=metadatas,
+        )
+
+        print(f"Indexed {i + len(batch)} / {len(chunks)}")
+
+    print("Done")
+
+
+def search(query: str, n_results: int = 5):
+    openai_client = get_openai_client()
+    collection = get_chroma_collection()
+
+    query_embedding = embed_texts(openai_client, [query])[0]
+
+    results = collection.query(
+        query_embeddings=[query_embedding],
+        n_results=n_results,
+        include=["documents", "metadatas", "distances"],
+    )
+
+    for i in range(len(results["ids"][0])):
+        print("\n--- RESULT ---")
+        print("Score distance:", results["distances"][0][i])
+        print("Metadata:", results["metadatas"][0][i])
+        print("Text:\n", results["documents"][0][i])
+
+
+if __name__ == "__main__":
+    index_csv()
+
+    # Test queries
+    search("clinic that performs cataract surgery in Noida")
+    search("dental clinic for root canal and laser dentistry in Hyderabad")
+    search("ophthalmology clinic with retina and glaucoma treatment")

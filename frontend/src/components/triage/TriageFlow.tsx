@@ -1,128 +1,156 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { motion } from 'motion/react';
-import { PlusCircle, Activity, Shield, Clock, MapPin, Search, Hospital as HospitalIcon, Loader2 } from 'lucide-react';
-import { TriageStep, TriageState, Hospital } from '../../types';
-import { SYMPTOMS_LIST, SEVERITY_LIST, DURATION_LIST } from '../../constants';
+import { PlusCircle, Activity, Shield, MapPin, Search, Hospital as HospitalIcon, Loader2 } from 'lucide-react';
+import { TriageStep, TriageState, Hospital, SpecialityInfo } from '../../types';
+import { SPECIALITY_MAP } from '../../constants';
 import { ResultCard } from './ResultCard';
-import { parseMedicalIntent, parseLocationIntent, shouldShowSymptomStep, classifyInput, validateLocation } from '../../lib/parser';
+import { analyzeComplaint, analyzeLocation, analyzeTriageResult, FollowUpQuestion, getFollowUpQuestions } from '../../lib/llm';
 
 interface TriageFlowProps {
   state: TriageState;
   setState: React.Dispatch<React.SetStateAction<TriageState>>;
   onReset: () => void;
+  needsManualLocation: boolean;
 }
 
-export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset }) => {
-  const { step, complaint, selectedSymptoms, severity, duration, location, speciality, showSymptoms, fallbackCount, fallbackMessage, isLocked, locationAttempts, confirmationData } = state;
+export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset, needsManualLocation }) => {
+  const { step, complaint, selectedSymptoms, severity, duration, location, speciality, showSymptoms, fallbackCount, fallbackMessage, locationAttempts, confirmationData } = state;
   const [hospitals, setHospitals] = useState<Hospital[]>([]);
   const [tempLocation, setTempLocation] = useState('');
   const [locationError, setLocationError] = useState<string | null>(null);
+  const [followUpQuestions, setFollowUpQuestions] = useState<FollowUpQuestion[]>([]);
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+  const [triageSummary, setTriageSummary] = useState('');
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isCheckingLocation, setIsCheckingLocation] = useState(false);
 
   const setStep = (s: TriageStep) => setState(prev => ({ ...prev, step: s }));
   
-  const handleComplaintSubmit = () => {
-    const classification = classifyInput(complaint);
+  const handleComplaintSubmit = async () => {
+    setIsAnalyzing(true);
+    const llmAnalysis = await analyzeComplaint(complaint);
 
-    if (classification.type === 'CONFIRM') {
-      setState(prev => ({
-        ...prev,
-        confirmationData: {
-          type: 'medical',
-          original: complaint,
-          suggestion: classification.suggestion
-        }
-      }));
+    if (!llmAnalysis) {
+      handleFallback("I can't check that right now because the AI service is unavailable. Please try again in a moment.");
+      setIsAnalyzing(false);
       return;
     }
 
-    if (classification.type === 'VALID') {
-      processValidComplaint(classification.corrected || complaint);
-    } else {
-      handleFallback(classification.message);
+    if (!llmAnalysis.isValid) {
+      handleFallback(llmAnalysis.message || "Could you describe the health issue or symptom you are facing?");
+      setIsAnalyzing(false);
+      return;
     }
+
+    if (!llmAnalysis.specialityName || !SPECIALITY_MAP[llmAnalysis.specialityName]) {
+      handleFallback("I couldn't match that to a medical speciality. Please describe the health issue another way.");
+      setIsAnalyzing(false);
+      return;
+    }
+
+    await processValidComplaint({
+      text: llmAnalysis.normalizedComplaint || complaint,
+      speciality: SPECIALITY_MAP[llmAnalysis.specialityName],
+      showSymptoms: llmAnalysis.showSymptoms,
+      detectedLocation: llmAnalysis.location,
+      healthIssues: llmAnalysis.healthIssues,
+    });
+    setIsAnalyzing(false);
   };
 
   const handleFallback = (message: string) => {
-    const newCount = fallbackCount + 1;
-    if (newCount >= 3) {
-      setState(prev => ({
-        ...prev,
-        fallbackCount: newCount,
-        fallbackMessage: "It seems like you might not have a medical concern right now. CareMap India is here whenever you need help finding a doctor or hospital. Feel free to come back anytime.",
-        isLocked: true
-      }));
-    } else {
-      setState(prev => ({
-        ...prev,
-        fallbackCount: newCount,
-        fallbackMessage: message
-      }));
-    }
+    setState(prev => ({
+      ...prev,
+      fallbackCount: fallbackCount + 1,
+      fallbackMessage: message
+    }));
   };
 
-  const processValidComplaint = (text: string) => {
-    const detectedSpeciality = parseMedicalIntent(text);
-    const detectedLocation = parseLocationIntent(text);
-    const symptomsRequired = shouldShowSymptomStep(text, detectedSpeciality.name);
-    
-    let validatedLoc = '';
-    if (detectedLocation) {
-      const v = validateLocation(detectedLocation);
-      if (v.isValid) {
-        validatedLoc = v.correction || detectedLocation;
-      }
+  const processValidComplaint = async ({
+    text,
+    speciality,
+    showSymptoms,
+    detectedLocation,
+    healthIssues,
+  }: {
+    text: string;
+    speciality: SpecialityInfo;
+    showSymptoms?: boolean;
+    detectedLocation?: string;
+    healthIssues?: string[];
+  }) => {
+    const questionsAnalysis = await getFollowUpQuestions(text, speciality, healthIssues);
+    const nextQuestions = questionsAnalysis?.questions
+      ?.filter(question => question.question && question.options?.length)
+      .map((question, index) => ({
+        ...question,
+        id: question.id || `question-${index + 1}`,
+        options: question.options.filter(Boolean).slice(0, 5),
+      }))
+      .filter(question => question.options.length >= 2)
+      .slice(0, 4);
+
+    if (!nextQuestions?.length) {
+      handleFallback("I couldn't prepare follow-up questions right now because the AI service is unavailable. Please try again.");
+      return;
     }
 
     setState(prev => ({
       ...prev,
       complaint: text,
-      speciality: detectedSpeciality,
-      location: validatedLoc || prev.location,
-      showSymptoms: symptomsRequired,
+      speciality,
+      location: detectedLocation || prev.location,
+      showSymptoms: true,
+      selectedSymptoms: [],
+      severity: '',
+      duration: '',
       fallbackMessage: null,
       confirmationData: null
     }));
+    setFollowUpQuestions(nextQuestions);
+    setCurrentQuestionIndex(0);
 
-    if (!validatedLoc && !location) {
+    if (!detectedLocation && needsManualLocation) {
       setStep('LOCATION_PROMPT');
     } else {
       setStep('SPECIALITY_INFO');
     }
   };
 
-  const handleLocationSubmit = () => {
+  const handleLocationSubmit = async () => {
     if (!tempLocation.trim()) return;
 
-    const v = validateLocation(tempLocation);
-    
-    if (!v.isValid) {
-      const newAttempts = locationAttempts + 1;
-      setLocationError(v.message || "Invalid location.");
-      setState(prev => ({ ...prev, locationAttempts: newAttempts }));
+    if (/^\d{4,8}$/.test(tempLocation.trim())) {
+      setLocationError("Please add your city or area name with the PIN code, for example 'Delhi 110001'. A city or area name alone is also fine.");
+      setState(prev => ({ ...prev, locationAttempts: locationAttempts + 1 }));
       return;
     }
 
-    if (v.correction && !v.isHighConfidence) {
-      setState(prev => ({
-        ...prev,
-        confirmationData: {
-          type: 'location',
-          original: tempLocation,
-          suggestion: v.correction!
-        }
-      }));
+    setIsCheckingLocation(true);
+    const llmLocation = await analyzeLocation(tempLocation);
+
+    if (!llmLocation) {
+      setLocationError("I can't check that location right now because the AI service is unavailable. Please try again in a moment.");
+      setIsCheckingLocation(false);
       return;
     }
 
-    const finalLocation = v.correction || tempLocation;
+    if (!llmLocation.isValid || !llmLocation.location) {
+      setLocationError(llmLocation.message || "Please enter a valid Indian city, area, or 6-digit PIN code.");
+      setState(prev => ({ ...prev, locationAttempts: locationAttempts + 1 }));
+      setIsCheckingLocation(false);
+      return;
+    }
+
     setState(prev => ({ 
       ...prev, 
-      location: finalLocation,
+      location: llmLocation.location!,
       locationAttempts: 0,
       confirmationData: null
     }));
     setLocationError(null);
     setStep('SPECIALITY_INFO');
+    setIsCheckingLocation(false);
   };
 
   const handleConfirmation = (confirmed: boolean) => {
@@ -130,7 +158,7 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
 
     if (confirmed) {
       if (confirmationData.type === 'medical') {
-        processValidComplaint(confirmationData.suggestion);
+        setState(prev => ({ ...prev, confirmationData: null }));
       } else {
         setState(prev => ({ 
           ...prev, 
@@ -146,14 +174,10 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
   };
 
   const handleSpecialityContinue = () => {
-    if (showSymptoms) {
-      setStep('SYMPTOMS');
-    } else {
-      setStep('SEVERITY');
-    }
+    setStep('SYMPTOMS');
   };
 
-  const fetchHospitals = async () => {
+  const fetchHospitals = async (severityOverride?: string) => {
     setStep('LOADING');
     try {
       const response = await fetch('/api/hospitals', {
@@ -163,42 +187,75 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
           speciality, 
           location, 
           symptoms: selectedSymptoms, 
-          severity, 
+          severity: severityOverride || severity, 
           duration 
         })
       });
+      if (!response.ok) {
+        throw new Error(`Hospital search failed with status ${response.status}`);
+      }
       const data = await response.json();
-      setHospitals(data.hospitals);
+      setHospitals(Array.isArray(data.hospitals) ? data.hospitals : []);
       setStep('RESULT');
     } catch (error) {
       console.error("Failed to fetch hospitals:", error);
-      // Fallback to error state or just stay in loading/result with empty
+      setHospitals([]);
       setStep('RESULT');
     }
   };
 
-  useEffect(() => {
-    if (step === 'RESULT' && hospitals.length === 0) {
-      // Small safeguard
-    }
-  }, [step]);
+  const currentQuestion = followUpQuestions[currentQuestionIndex];
+  const currentAnswer = currentQuestion
+    ? selectedSymptoms.find(answer => answer.startsWith(`${currentQuestion.question}: `))
+    : null;
 
-  const toggleSymptom = (symp: string) => {
+  const selectFollowUpAnswer = (answer: string) => {
+    if (!currentQuestion) return;
+    const formattedAnswer = `${currentQuestion.question}: ${answer}`;
+
     setState(prev => ({
       ...prev,
-      selectedSymptoms: prev.selectedSymptoms.includes(symp)
-        ? prev.selectedSymptoms.filter(s => s !== symp)
-        : [...prev.selectedSymptoms, symp]
+      selectedSymptoms: [
+        ...prev.selectedSymptoms.filter(item => !item.startsWith(`${currentQuestion.question}: `)),
+        formattedAnswer
+      ]
     }));
   };
 
-  const getTriageClass = () => {
-    if (severity === 'Emergency') return { label: 'EMERGENCY', color: 'bg-red-600', text: 'Call 112 immediately. Go to the nearest Emergency Room.' };
-    if (severity === 'Severe') return { label: 'URGENT', color: 'bg-orange-600', text: 'Seek medical attention within 24 hours. A specialist should evaluate this.' };
-    return { label: 'ROUTINE', color: 'bg-blue-600', text: 'Visit a primary care physician or general clinic as soon as possible.' };
+  const continueFollowUps = async () => {
+    if (currentQuestionIndex < followUpQuestions.length - 1) {
+      setCurrentQuestionIndex(prev => prev + 1);
+      return;
+    }
+
+    const triageResult = await analyzeTriageResult(complaint, speciality, selectedSymptoms);
+    if (!triageResult) {
+      handleFallback("I couldn't categorize your care level right now because the AI service is unavailable. Please try again.");
+      return;
+    }
+
+    const finalSeverity = triageResult.label === 'EMERGENCY'
+      ? 'Emergency'
+      : triageResult.label === 'URGENT'
+        ? 'Urgent'
+        : 'Routine';
+
+    setTriageSummary(triageResult.text);
+    setState(prev => ({
+      ...prev,
+      duration: 'LLM follow-up answers provided',
+      severity: finalSeverity
+    }));
+    await fetchHospitals(finalSeverity);
   };
 
-  const steps: TriageStep[] = ['COMPLAINT', 'LOCATION_PROMPT', 'SPECIALITY_INFO', 'SYMPTOMS', 'SEVERITY', 'DURATION', 'RESULT'];
+  const getTriageClass = () => {
+    if (severity === 'Emergency') return { label: 'EMERGENCY', color: 'bg-red-600', text: triageSummary || 'Call 112 immediately. Go to the nearest Emergency Room.' };
+    if (severity === 'Urgent' || severity === 'Severe') return { label: 'URGENT', color: 'bg-orange-600', text: triageSummary || 'Seek medical attention within 24 hours. A specialist should evaluate this.' };
+    return { label: 'ROUTINE', color: 'bg-blue-600', text: triageSummary || 'Schedule a routine visit with a primary care physician or clinic.' };
+  };
+
+  const steps: TriageStep[] = ['COMPLAINT', 'LOCATION_PROMPT', 'SPECIALITY_INFO', 'SYMPTOMS', 'RESULT'];
 
   return (
     <motion.section 
@@ -279,25 +336,15 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
                 placeholder="e.g., I have been feeling dizzy and have a mild fever. I'm in Ranchi."
                 value={complaint}
                 onChange={(e) => setState(prev => ({ ...prev, complaint: e.target.value }))}
-                disabled={isLocked}
               />
 
-              {isLocked ? (
-                <button 
-                  onClick={onReset}
-                  className="w-full btn-outline py-4 text-xl"
-                >
-                  Start Over
-                </button>
-              ) : (
-                <button 
-                  disabled={!complaint.trim()} 
-                  onClick={handleComplaintSubmit}
-                  className="w-full btn-primary py-4 text-xl"
-                >
-                  Continue →
-                </button>
-              )}
+              <button 
+                disabled={!complaint.trim() || isAnalyzing} 
+                onClick={() => void handleComplaintSubmit()}
+                className="w-full btn-primary py-4 text-xl"
+              >
+                {isAnalyzing ? 'Checking...' : 'Continue →'}
+              </button>
             </div>
           )}
 
@@ -308,7 +355,9 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
               </div>
               <div className="space-y-3">
                 <h3 className="text-3xl font-display font-bold text-slate-900">Where are you located?</h3>
-                <p className="text-slate-500 max-w-sm mx-auto">We need your area or city to find the best facilities closest to you.</p>
+                <p className="text-slate-500 max-w-sm mx-auto">
+                  I couldn't use your browser location. Enter your city or area name. You can add a PIN code too, but a PIN code alone is not enough.
+                </p>
               </div>
               {locationError && (
                 <div className="bg-red-50 text-red-600 p-4 rounded-xl text-sm font-medium border border-red-100">
@@ -336,18 +385,20 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
                   type="text"
                   autoFocus
                   className="w-full bg-slate-50 border border-slate-200 rounded-2xl py-6 pl-16 pr-6 focus:outline-none focus:ring-4 focus:ring-primary/10 transition-all text-xl placeholder:text-slate-300"
-                  placeholder="City name, Area, or PIN code"
+                  placeholder="e.g., Delhi or Delhi 110001"
                   value={tempLocation}
                   onChange={(e) => setTempLocation(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleLocationSubmit()}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void handleLocationSubmit();
+                  }}
                 />
               </div>
               <button 
-                disabled={!tempLocation.trim()} 
-                onClick={handleLocationSubmit}
+                disabled={!tempLocation.trim() || isCheckingLocation} 
+                onClick={() => void handleLocationSubmit()}
                 className="w-full btn-primary py-4 text-xl"
               >
-                Set Location →
+                {isCheckingLocation ? 'Checking Location...' : 'Set Location →'}
               </button>
             </div>
           )}
@@ -398,88 +449,47 @@ export const TriageFlow: React.FC<TriageFlowProps> = ({ state, setState, onReset
             <div className="space-y-8">
               <div className="flex items-center gap-3 text-primary">
                 <Activity size={32} />
-                <h3 className="text-3xl font-display font-bold">Any additional symptoms?</h3>
+                <h3 className="text-3xl font-display font-bold">A few quick details</h3>
               </div>
-              <p className="text-slate-500">Tick any of the following that apply to you. You can select multiple.</p>
-              <div className="grid gap-3">
-                {SYMPTOMS_LIST.map(symp => (
-                  <button
-                    key={symp}
-                    onClick={() => toggleSymptom(symp)}
-                    className={`text-left px-6 py-5 rounded-2xl border-2 transition-all flex justify-between items-center ${selectedSymptoms.includes(symp) ? 'bg-primary/5 border-primary text-primary font-bold active:scale-95' : 'bg-white border-slate-100 text-slate-600 hover:border-slate-200'}`}
-                  >
-                    <span>{symp}</span>
-                    {selectedSymptoms.includes(symp) && <div className="bg-primary text-white p-1 rounded-full"><PlusCircle size={16} /></div>}
-                  </button>
-                ))}
+              <div className="flex items-center justify-between gap-4">
+                <p className="text-slate-500">
+                  Question {currentQuestionIndex + 1} of {followUpQuestions.length}
+                </p>
+                <span className="text-xs font-bold text-accent uppercase tracking-widest bg-accent/5 px-3 py-1 rounded-full">
+                  AI tailored
+                </span>
               </div>
-              <button 
-                disabled={selectedSymptoms.length === 0} 
-                onClick={() => setStep('SEVERITY')}
-                className="w-full btn-primary py-4 text-xl"
-              >
-                Continue →
-              </button>
-            </div>
-          )}
+              {currentQuestion ? (
+                <>
+                  <h4 className="text-2xl font-display font-bold text-slate-900">{currentQuestion.question}</h4>
+                  <div className="grid gap-3">
+                    {currentQuestion.options.map(option => {
+                      const isSelected = currentAnswer === `${currentQuestion.question}: ${option}`;
 
-          {step === 'SEVERITY' && (
-            <div className="space-y-8">
-              <div className="flex items-center gap-3 text-primary">
-                <Shield size={32} />
-                <h3 className="text-3xl font-display font-bold">How severe is it?</h3>
-              </div>
-              <p className="text-slate-500">Pick the level that best describes how you feel right now.</p>
-              <div className="grid gap-3">
-                {SEVERITY_LIST.map(sev => (
-                  <button
-                    key={sev.id}
-                    onClick={() => {
-                      setState(prev => ({ ...prev, severity: sev.label }));
-                      setStep('DURATION');
-                    }}
-                    className={`text-left px-6 py-5 rounded-2xl border-2 transition-all group ${severity === sev.label ? 'bg-primary/5 border-primary text-primary' : 'bg-white border-slate-100'}`}
+                      return (
+                        <button
+                          key={option}
+                          onClick={() => selectFollowUpAnswer(option)}
+                          className={`text-left px-6 py-5 rounded-2xl border-2 transition-all font-bold ${isSelected ? 'bg-primary/5 border-primary text-primary' : 'bg-white border-slate-100 text-slate-700 hover:border-slate-200'}`}
+                        >
+                          {option}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <button 
+                    disabled={!currentAnswer} 
+                    onClick={() => void continueFollowUps()}
+                    className="w-full btn-primary py-4 text-xl"
                   >
-                    <p className="text-lg font-bold text-slate-800 group-hover:text-primary">{sev.label}</p>
-                    <p className="text-sm text-slate-500">{sev.desc}</p>
+                    {currentQuestionIndex < followUpQuestions.length - 1 ? 'Continue →' : 'Search Facilities →'}
                   </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {step === 'DURATION' && (
-            <div className="space-y-8">
-              <div className="flex items-center gap-3 text-primary">
-                <Clock size={32} />
-                <h3 className="text-3xl font-display font-bold">How long?</h3>
-              </div>
-              <p className="text-slate-500">Knowing the duration helps us determine the urgency of your visit.</p>
-              <div className="grid gap-3">
-                {DURATION_LIST.map(dur => (
-                  <button
-                    key={dur}
-                    onClick={() => {
-                      setState(prev => ({ ...prev, duration: dur }));
-                      // We don't call setStep('RESULT') directly, we call fetchHospitals
-                    }}
-                    onMouseUp={() => {
-                       // We trigger fetch in useEffect or here
-                       setState(prev => ({ ...prev, duration: dur }));
-                    }}
-                    className={`text-left px-6 py-5 rounded-2xl border-2 transition-all font-bold text-lg ${duration === dur ? 'bg-primary/5 border-primary text-primary' : 'bg-white border-slate-100 text-slate-700 hover:border-slate-200'}`}
-                  >
-                    {dur}
-                  </button>
-                ))}
-              </div>
-              <button 
-                disabled={!state.duration} 
-                onClick={fetchHospitals}
-                className="w-full btn-primary py-4 text-xl mt-4"
-              >
-                Search Facilities →
-              </button>
+                </>
+              ) : (
+                <div className="bg-red-50 text-red-600 p-4 rounded-xl text-sm font-medium border border-red-100">
+                  I could not prepare follow-up questions. Please go back and try again.
+                </div>
+              )}
             </div>
           )}
 

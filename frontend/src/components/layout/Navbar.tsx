@@ -4,9 +4,15 @@ import { Activity, Menu, MapPin } from 'lucide-react';
 interface NavbarProps {
   onLogoClick: () => void;
   location?: string;
+  locationStatus?: 'detecting' | 'ready' | 'denied' | 'unavailable';
 }
 
-export const Navbar: React.FC<NavbarProps> = ({ onLogoClick, location }) => {
+export const Navbar: React.FC<NavbarProps> = ({ onLogoClick, location, locationStatus = 'detecting' }) => {
+  const locationLabel = location
+    || (locationStatus === 'denied' ? 'Not shared'
+      : locationStatus === 'unavailable' ? 'Unavailable'
+        : 'Detecting...');
+
   return (
     <nav className="bg-white border-b border-slate-200 sticky top-0 z-50">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -23,17 +29,17 @@ export const Navbar: React.FC<NavbarProps> = ({ onLogoClick, location }) => {
 
           <div className="hidden lg:flex items-center gap-4 bg-slate-50 px-4 py-2 rounded-full border border-slate-100">
             <MapPin size={16} className="text-accent" />
-            <span className="text-sm font-medium text-slate-600">Location: {location || "Detecting..."}</span>
+            <span className="text-sm font-medium text-slate-600">Location: {locationLabel}</span>
           </div>
 
           <button className="md:hidden text-primary">
             <Menu size={24} />
           </button>
         </div>
-        {location && (
+        {(location || locationStatus !== 'detecting') && (
           <div className="lg:hidden py-2 border-t border-slate-50 flex items-center gap-2 justify-center">
             <MapPin size={14} className="text-accent" />
-            <span className="text-xs font-bold text-slate-500 uppercase tracking-tight">Viewing results for: {location}</span>
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-tight">Location: {locationLabel}</span>
           </div>
         )}
       </div>

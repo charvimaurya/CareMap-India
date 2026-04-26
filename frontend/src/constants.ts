@@ -1,27 +1,5 @@
 import { SpecialityInfo } from './types';
 
-export const SYMPTOMS_LIST = [
-  "High fever (above 101°F / 38.5°C)",
-  "Severe body ache or joint pain",
-  "Cough, cold, or sore throat",
-  "Vomiting or diarrhea",
-  "Severe headache or skin rash"
-];
-
-export const SEVERITY_LIST = [
-  { id: 'mild', label: "Mild", desc: "I can manage daily activities" },
-  { id: 'moderate', label: "Moderate", desc: "It's affecting my routine" },
-  { id: 'severe', label: "Severe", desc: "I need help moving or functioning" },
-  { id: 'emergency', label: "Emergency", desc: "I need immediate help" }
-];
-
-export const DURATION_LIST = [
-  "Just started (under 2 hours)",
-  "2–12 hours",
-  "1–3 days",
-  "Over a week"
-];
-
 export const SPECIALITY_MAP: Record<string, SpecialityInfo> = {
   "Orthopaedics": {
     name: "Orthopaedics",

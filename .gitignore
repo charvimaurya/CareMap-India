@@ -1,1 +1,8 @@
 frontend/node_modules
+node_modules
+.env
+.env.*
+!.env.example
+frontend/.env
+frontend/.env.*
+!frontend/.env.example

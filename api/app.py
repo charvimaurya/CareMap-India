@@ -191,6 +191,9 @@ def health():
         },
     }
 
+
+
+
     if chroma_error:
         components["chroma"]["error"] = chroma_error
 
